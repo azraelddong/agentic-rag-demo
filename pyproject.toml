@@ -1,0 +1,32 @@
+[project]
+name = "agentic-rag-demo"
+version = "0.1.0"
+description = "Enterprise-style Basic RAG demo with Agentic RAG extension points."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110.0",
+    "langchain>=0.2.10",
+    "langchain-text-splitters>=0.2.2",
+    "langgraph>=0.2.0",
+    "openai>=1.30.0",
+    "pydantic-settings>=2.2.1",
+    "pymilvus>=2.4.4",
+    "pypdf>=4.2.0",
+    "python-dotenv>=1.0.1",
+    "python-multipart>=0.0.9",
+    "uvicorn[standard]>=0.29.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27.0",
+    "pytest>=8.2.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
