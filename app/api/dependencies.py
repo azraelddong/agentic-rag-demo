@@ -14,11 +14,14 @@ from app.services.chat_service import ChatService
 from app.services.document_service import DocumentService
 
 
+"""依赖注入模块，提供应用中各个组件的单例实例。使用lru_cache装饰器实现简单的单例模式，确保每个组件在应用生命周期内只创建一次。"""
+
+"""获取MilvusVectorStore实例，连接到Milvus向量数据库。"""
 @lru_cache
 def get_vector_store() -> MilvusVectorStore:
     return MilvusVectorStore(get_settings())
 
-
+"""获取EmbeddingModel嵌入实例，根据配置选择具体的实现。"""
 @lru_cache
 def get_embedding_model():
     settings = get_settings()
@@ -30,7 +33,7 @@ def get_embedding_model():
         model_name=settings.embedding_model_name,
     )
 
-
+"""获取ChatModel实例，根据配置创建OpenAI兼容的聊天模型。"""
 @lru_cache
 def get_chat_model() -> OpenAICompatibleChatModel:
     settings = get_settings()
@@ -42,7 +45,7 @@ def get_chat_model() -> OpenAICompatibleChatModel:
         max_tokens=settings.llm_max_tokens,
     )
 
-
+"""获取DocumentService实例，注入所需的依赖组件。"""
 @lru_cache
 def get_document_service() -> DocumentService:
     settings = get_settings()
@@ -57,7 +60,7 @@ def get_document_service() -> DocumentService:
         vector_store=get_vector_store(),
     )
 
-
+"""获取ChatService实例，注入所需的依赖组件，包括RAGChain和相关的子组件。"""
 @lru_cache
 def get_chat_service() -> ChatService:
     settings = get_settings()

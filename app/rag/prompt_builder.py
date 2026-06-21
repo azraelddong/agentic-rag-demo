@@ -3,16 +3,18 @@ from collections.abc import Sequence
 from app.llm.chat_model import ChatMessage
 from app.rag.vector_store import SearchResult
 
-
+"""提示词构建器，将检索到的上下文和用户问题构建成符合LLM输入格式的消息列表。"""
 class PromptBuilder:
     """Build a strict RAG prompt grounded in retrieved context."""
 
+    """系统提示词"""
     system_prompt = (
         "你是企业知识库问答助手。必须只基于提供的检索上下文回答问题。"
         "如果上下文中没有相关信息，必须回答：知识库中未找到相关信息。"
         "不要编造上下文以外的事实。"
     )
 
+    """构建消息列表"""
     def build_messages(self, question: str, contexts: Sequence[SearchResult]) -> list[ChatMessage]:
         context_text = self._format_contexts(contexts)
         user_prompt = (

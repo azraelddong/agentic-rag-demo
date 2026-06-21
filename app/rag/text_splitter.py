@@ -29,6 +29,11 @@ class ChunkSplitter:
             for index, text in enumerate(self.splitter.split_text(document.text)):
                 if not text.strip():
                     continue
+                """
+                🌈
+                **:解析键值对,比如字典
+                *: 解析可迭代对象,比如列表,元组,集和等
+                """
                 metadata = {
                     **document.metadata,
                     "chunk_index": index,

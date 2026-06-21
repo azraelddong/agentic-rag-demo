@@ -7,7 +7,7 @@ from app.core.exceptions import ConfigurationError, LLMProviderError
 
 logger = logging.getLogger(__name__)
 
-
+"""抽象的Embedding模型接口，定义了文本向量化的方法。"""
 class EmbeddingModel(ABC):
     """Embedding model interface for remote and local embedding providers."""
 
@@ -18,7 +18,7 @@ class EmbeddingModel(ABC):
     def embed_query(self, query: str) -> list[float]:
         return self.embed_texts([query])[0]
 
-
+"""Embedding模型接口，支持远程和本地的Embedding提供者。定义了一个抽象方法embed_texts用于批量文本的向量化，以及一个默认实现的embed_query方法用于单个查询的向量化。"""
 class OpenAICompatibleEmbeddingModel(EmbeddingModel):
     """Embedding adapter for OpenAI-compatible embedding APIs."""
 
@@ -52,7 +52,7 @@ class OpenAICompatibleEmbeddingModel(EmbeddingModel):
             logger.exception("Embedding provider request failed")
             raise LLMProviderError("Embedding 调用失败", detail={"error": str(exc)}) from exc
 
-
+"""基于bge-m3的Embedding模型，目前作为本地Embedding的预留扩展点，尚未实现具体的向量化逻辑。"""
 class BgeM3EmbeddingModel(EmbeddingModel):
     """Reserved extension point for local bge-m3 embeddings."""
 

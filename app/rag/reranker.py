@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 from app.rag.vector_store import SearchResult
 
-
+"""抽象类Reranker"""
 class Reranker(ABC):
     """Rerank retrieved chunks before prompt construction."""
 

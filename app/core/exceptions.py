@@ -1,6 +1,6 @@
 from http import HTTPStatus
 
-
+"""自定义异常类"""
 class AppError(Exception):
     """Base application error surfaced through FastAPI handlers."""
 

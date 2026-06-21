@@ -14,10 +14,11 @@ from app.schemas.document_schema import DocumentIndexResponse, DocumentUploadRes
 
 logger = logging.getLogger(__name__)
 
-
+"""文档service"""
 class DocumentService:
     """Document upload and indexing application service."""
 
+    """初始化构造函数"""
     def __init__(
         self,
         *,
@@ -33,6 +34,7 @@ class DocumentService:
         self.embedding_model = embedding_model
         self.vector_store = vector_store
 
+    """上传文档"""
     async def upload_document(self, file: UploadFile) -> DocumentUploadResponse:
         filename = self._safe_filename(file.filename)
         suffix = Path(filename).suffix.lower().lstrip(".")
@@ -63,6 +65,7 @@ class DocumentService:
             size_bytes=len(content),
         )
 
+    """分隔文档建立索引"""
     def index_documents(self, *, docs_dir: str | None = None, rebuild: bool = False) -> DocumentIndexResponse:
         source_dir = Path(docs_dir) if docs_dir else self.settings.docs_path
         if not source_dir.is_absolute():
@@ -108,9 +111,11 @@ class DocumentService:
         )
 
     def _batch_chunks(self, chunks: list[DocumentChunk], batch_size: int) -> list[list[DocumentChunk]]:
+        """将文档块分批处理"""
         return [chunks[index : index + batch_size] for index in range(0, len(chunks), batch_size)]
 
     def _safe_filename(self, filename: str | None) -> str:
+        """生成安全的文件名"""
         if not filename:
             raise DocumentProcessingError("缺少上传文件名")
         safe_name = Path(filename).name
@@ -118,6 +123,7 @@ class DocumentService:
             raise DocumentProcessingError("非法上传文件名")
         return safe_name
 
+    """避免文件名冲突，生成唯一的文件路径"""
     def _deduplicate_path(self, path: Path) -> Path:
         if not path.exists():
             return path

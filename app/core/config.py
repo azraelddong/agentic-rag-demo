@@ -9,14 +9,15 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-
+"""从.env文件和环境变量加载的运行时配置。"""
 class Settings(BaseSettings):
     """Runtime configuration loaded from environment variables and .env."""
 
+    """BaseSettings内部自动读取Settings.model_config来配置环境变量加载行为。"""
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
-        extra="ignore",
+        extra="ignore", # 忽略未在Settings中定义的环境变量，避免因环境中存在无关变量而导致加载失败
     )
 
     app_name: str = "agentic-rag-demo"
@@ -34,12 +35,14 @@ class Settings(BaseSettings):
     chunk_size: int = 800
     chunk_overlap: int = 100
 
+    """LLM相关配置，支持OpenAI兼容接口。"""
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model_name: str = "gpt-4o-mini"
     llm_temperature: float = 0.2
     llm_max_tokens: int = 1024
 
+    """Embedding相关配置，支持OpenAI兼容接口。"""
     embedding_base_url: str | None = None
     embedding_api_key: str | None = None
     embedding_model_name: str = "text-embedding-3-small"
@@ -47,9 +50,11 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 64
     embedding_provider: str = "openai_compatible"
 
+    """Reranking相关配置"""
     rerank_provider: str = "none"
     rerank_model_name: str = "bge-reranker-v2-m3"
 
+    """milvus相关配置"""
     milvus_uri: str = "http://localhost:19530"
     milvus_user: str = ""
     milvus_password: str = ""

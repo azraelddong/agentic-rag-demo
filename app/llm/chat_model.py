@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 ChatMessage = dict[str, str]
 
-
+"""聊天模型接口，定义了生成回答的方法。"""
 class ChatModel(ABC):
     """Chat completion interface for OpenAI-compatible providers."""
 
@@ -18,7 +18,7 @@ class ChatModel(ABC):
     def generate(self, messages: Sequence[ChatMessage]) -> str:
         """Generate an answer from chat messages."""
 
-
+"""适配OpenAI、Qwen、DeepSeek或任何兼容的聊天API的聊天模型实现。"""
 class OpenAICompatibleChatModel(ChatModel):
     """Adapter for OpenAI, Qwen, DeepSeek, or any compatible chat API."""
 

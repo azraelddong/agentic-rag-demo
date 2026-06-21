@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 NOT_FOUND_ANSWER = "知识库中未找到相关信息"
 
-
+"""RAG链，负责协调检索、重排序、构建提示词和生成等组件，实现基于检索增强的问答功能。"""
 class RAGChain:
     """Basic retrieval-augmented generation chain for phase 1."""
 

@@ -10,14 +10,14 @@ from app.core.exceptions import DocumentProcessingError
 logger = logging.getLogger(__name__)
 
 
-@dataclass(slots=True)
+@dataclass(slots=True)  # 使用slots优化内存占用,禁止动态添加属性, @dataclass注解自动生成初始化方法(__init__)和打印方法(__repr__)和比较方法(__eq__)等
 class ParsedDocument:
     """Normalized document content with source metadata."""
 
     text: str
     metadata: dict
 
-
+"""文档加载器，负责从本地文件系统加载支持的文档类型，并提取文本内容和相关元数据。"""
 class DocumentLoader:
     """Load supported documents from local files."""
 

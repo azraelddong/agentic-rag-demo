@@ -8,7 +8,7 @@ from app.services.chat_service import ChatService
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-
+"""问题接口，接收用户问题并返回回答。依赖注入ChatService来处理业务逻辑。"""
 @router.post("/ask", response_model=ChatResponse)
 def ask(
     request: ChatRequest,

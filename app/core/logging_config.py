@@ -5,13 +5,13 @@ from logging.config import dictConfig
 from logging.handlers import BaseRotatingHandler
 from pathlib import Path
 
-
+"""支持基于时间和大小的日志文件滚动，保留指定天数的日志文件"""
 class SizeAndTimeRotatingFileHandler(BaseRotatingHandler):
     """Rotate a log file at midnight or before it exceeds the size limit."""
 
     def __init__(
         self,
-        filename: str | Path,
+        filename: str | Path,   # 
         max_bytes: int,
         retention_days: int,
         encoding: str = "utf-8",
@@ -123,7 +123,7 @@ def configure_logging(
                 },
             },
             "root": {
-                "handlers": ["console", "file"],
+                "handlers": ["console"],
                 "level": level.upper(),
             },
         }

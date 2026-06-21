@@ -21,7 +21,7 @@ class SearchResult:
     score: float
     metadata: dict
 
-
+"""Milvus向量存储，支持集合自动创建和元数据过滤。"""
 class MilvusVectorStore:
     """Milvus vector store with collection auto-creation and metadata filtering."""
 
@@ -183,6 +183,7 @@ class MilvusVectorStore:
                 detail={"collection": self.collection_name, "error": str(exc)},
             ) from exc
 
+    """相似度搜索，支持可选的元数据过滤和结果数量限制"""
     def similarity_search(
         self,
         query_vector: list[float],
@@ -190,6 +191,7 @@ class MilvusVectorStore:
         top_k: int,
         metadata_filter: dict[str, Any] | None = None,
     ) -> list[SearchResult]:
+        """根据查询向量进行相似度搜索，返回相似的文档块列表。支持可选的元数据过滤和结果数量限制。"""
         self.ensure_collection()
         filter_expression = self._build_filter_expression(metadata_filter)
         output_fields = [

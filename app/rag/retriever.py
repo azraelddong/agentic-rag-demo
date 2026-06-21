@@ -18,6 +18,7 @@ class Retriever:
         top_k: int,
         metadata_filter: dict[str, Any] | None = None,
     ) -> list[SearchResult]:
+        """根据用户查询进行检索，返回相似的文档块列表。首先将查询转换为向量，然后在Milvus中执行相似度搜索，支持可选的元数据过滤和结果数量限制。"""
         query_vector = self.embedding_model.embed_query(query)
         return self.vector_store.similarity_search(
             query_vector,
