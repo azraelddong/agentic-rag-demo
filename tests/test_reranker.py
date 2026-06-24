@@ -19,6 +19,16 @@ def _clear_settings_caches() -> None:
     get_reranker.cache_clear()
 
 
+def test_settings_parses_rerank_integers_with_inline_comments(monkeypatch) -> None:
+    monkeypatch.setenv("RERANK_TOP_N", "5  # Rerank 后保留数量")
+    monkeypatch.setenv("RERANK_RETRIEVAL_K", "20  # Rerank 前召回候选数")
+
+    settings = Settings()
+
+    assert settings.rerank_top_n == 5
+    assert settings.rerank_retrieval_k == 20
+
+
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------

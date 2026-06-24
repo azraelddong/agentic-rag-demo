@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "FastAPI Debug",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "python": "/Users/apple/Documents/study/agentic-rag-demo/.venv/bin/python",
+      "cwd": "/Users/apple/Documents/study/agentic-rag-demo",
+      "pythonArgs": ["-Xfrozen_modules=off"],
+      "args": [
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000"
+      ],
+      "env": {
+        "PYTHONPATH": "/Users/apple/Documents/study/agentic-rag-demo"
+      },
+      "justMyCode": false
+    }
+  ]
+}

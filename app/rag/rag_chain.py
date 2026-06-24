@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import logging
 from typing import Any
 
 from app.core.config import Settings
 from app.llm.chat_model import ChatModel
 from app.rag.prompt_builder import PromptBuilder
+from app.rag.query_rewriter import QueryRewriter
 from app.rag.reranker import Reranker
 from app.rag.retriever import Retriever
 from app.rag.vector_store import SearchResult
@@ -24,12 +27,14 @@ class RAGChain:
         prompt_builder: PromptBuilder,
         chat_model: ChatModel,
         reranker: Reranker,
+        query_rewriter: QueryRewriter | None = None,
     ) -> None:
         self.settings = settings
         self.retriever = retriever
         self.prompt_builder = prompt_builder
         self.chat_model = chat_model
         self.reranker = reranker
+        self.query_rewriter = query_rewriter
 
     def ask(
         self,
@@ -40,6 +45,13 @@ class RAGChain:
     ) -> tuple[str, list[SearchResult]]:
         normalized_question = question.strip()
 
+        # Rewrite query for retrieval if enabled (keep original for LLM prompt)
+        search_query = normalized_question
+        if self.settings.query_rewrite_enabled and self.query_rewriter is not None:
+            logger.info("Query rewrite 前: \"%s\"", normalized_question)
+            search_query = self.query_rewriter.rewrite(normalized_question)
+            logger.info("Query rewrite 后: \"%s\"", search_query)
+
         # Retrieve more candidates when reranking is enabled (M in M→N strategy)
         if self.settings.rerank_enabled:
             retrieval_k = top_k or self.settings.rerank_retrieval_k
@@ -49,19 +61,20 @@ class RAGChain:
             rerank_top_n = None
 
         results = self.retriever.retrieve(
-            normalized_question,
+            search_query,
             top_k=retrieval_k,
             metadata_filter=metadata_filter,
         )
         results = self._filter_by_score(results)
         self._log_retrieval_results(results)
-        results = self.reranker.rerank(normalized_question, results, top_n=rerank_top_n)
+        results = self.reranker.rerank(search_query, results, top_n=rerank_top_n)
         self._log_reranked_results(results)
 
         if not results:
             logger.info("No relevant chunks found for query")
             return NOT_FOUND_ANSWER, []
 
+        # Use the original question for the LLM, not the rewritten search query
         messages = self.prompt_builder.build_messages(normalized_question, results)
         answer = self.chat_model.generate(messages)
         if not answer:

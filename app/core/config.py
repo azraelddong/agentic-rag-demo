@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     rag_top_k: int = 5
     rag_score_threshold: float | None = 0.2
     query_max_chars: int = 2000
+    query_rewrite_enabled: bool = False
 
     @field_validator("allowed_document_extensions", mode="before")
     @classmethod
@@ -91,6 +92,13 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_provider(cls, value: str) -> str:
         return value.strip().lower().replace("-", "_")
+
+    @field_validator("rerank_top_n", "rerank_retrieval_k", mode="before")
+    @classmethod
+    def strip_rerank_integer_inline_comment(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.split("#", 1)[0].strip()
+        return value
 
     @property
     def docs_path(self) -> Path:
