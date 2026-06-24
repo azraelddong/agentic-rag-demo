@@ -6,6 +6,13 @@ from app.llm.chat_model import ChatMessage
 
 logger = logging.getLogger(__name__)
 
+# LangChain message .type → OpenAI-compatible role
+_LC_TYPE_TO_ROLE: dict[str, str] = {
+    "system": "system",
+    "human": "user",
+    "ai": "assistant",
+}
+
 REWRITE_SYSTEM_PROMPT = """你是一个查询优化助手。你的任务是将用户原始问题改写为更适合知识库向量检索的查询语句。
 
 改写规则：
@@ -32,7 +39,8 @@ class QueryRewriter:
         try:
             llm_input = self._prompt.invoke({"question": question})
             messages: list[ChatMessage] = [
-                {"role": msg.type, "content": msg.content} for msg in llm_input.messages
+                {"role": _LC_TYPE_TO_ROLE.get(msg.type, msg.type), "content": msg.content}
+                for msg in llm_input.messages
             ]
             rewritten = self._generate(messages)
             if rewritten and rewritten != question:
