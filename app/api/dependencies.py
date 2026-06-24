@@ -6,7 +6,7 @@ from app.llm.embedding_model import BgeM3EmbeddingModel, OpenAICompatibleEmbeddi
 from app.rag.document_loader import DocumentLoader
 from app.rag.prompt_builder import PromptBuilder
 from app.rag.rag_chain import RAGChain
-from app.rag.reranker import NoopReranker
+from app.rag.reranker import BgeReranker, JinaReranker, NoopReranker, SiliconFlowReranker
 from app.rag.retriever import Retriever
 from app.rag.text_splitter import ChunkSplitter
 from app.rag.vector_store import MilvusVectorStore
@@ -45,6 +45,27 @@ def get_chat_model() -> OpenAICompatibleChatModel:
         max_tokens=settings.llm_max_tokens,
     )
 
+"""获取Reranker实例，根据rerank_provider配置选择具体的实现。"""
+@lru_cache
+def get_reranker():
+    settings = get_settings()
+    provider = settings.rerank_provider
+    if provider == "siliconflow":
+        return SiliconFlowReranker(
+            base_url=settings.effective_rerank_base_url,
+            api_key=settings.effective_rerank_api_key,
+            model_name=settings.rerank_model_name,
+        )
+    if provider == "jina":
+        return JinaReranker(
+            base_url=settings.effective_rerank_base_url,
+            api_key=settings.effective_rerank_api_key,
+            model_name=settings.rerank_model_name,
+        )
+    if provider == "bge":
+        return BgeReranker()
+    return NoopReranker()
+
 """获取DocumentService实例，注入所需的依赖组件。"""
 @lru_cache
 def get_document_service() -> DocumentService:
@@ -70,6 +91,6 @@ def get_chat_service() -> ChatService:
         retriever=retriever,
         prompt_builder=PromptBuilder(),
         chat_model=get_chat_model(),
-        reranker=NoopReranker(),
+        reranker=get_reranker(),
     )
     return ChatService(rag_chain)

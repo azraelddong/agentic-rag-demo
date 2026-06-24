@@ -39,13 +39,24 @@ class RAGChain:
         metadata_filter: dict[str, Any] | None = None,
     ) -> tuple[str, list[SearchResult]]:
         normalized_question = question.strip()
+
+        # Retrieve more candidates when reranking is enabled (M in M→N strategy)
+        if self.settings.rerank_enabled:
+            retrieval_k = top_k or self.settings.rerank_retrieval_k
+            rerank_top_n = self.settings.rerank_top_n
+        else:
+            retrieval_k = top_k or self.settings.rag_top_k
+            rerank_top_n = None
+
         results = self.retriever.retrieve(
             normalized_question,
-            top_k=top_k or self.settings.rag_top_k,
+            top_k=retrieval_k,
             metadata_filter=metadata_filter,
         )
         results = self._filter_by_score(results)
-        results = self.reranker.rerank(normalized_question, results)
+        self._log_retrieval_results(results)
+        results = self.reranker.rerank(normalized_question, results, top_n=rerank_top_n)
+        self._log_reranked_results(results)
 
         if not results:
             logger.info("No relevant chunks found for query")
@@ -66,3 +77,43 @@ class RAGChain:
         if metric_type == "L2":
             return [result for result in results if result.score <= threshold]
         return [result for result in results if result.score >= threshold]
+
+    # ------------------------------------------------------------------
+    # Detailed logging helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _format_result(index: int, result: SearchResult) -> str:
+        """Format a single SearchResult as a compact one-line summary."""
+        meta = result.metadata
+        text_preview = result.text[:120].replace("\n", " ")
+        return (
+            f"[{index:>2}] score={result.score:.4f}  "
+            f"file={meta.get('file_name', '?')}  "
+            f"chunk={meta.get('chunk_index', '?')}  "
+            f"text=\"{text_preview}...\""
+        )
+
+    def _log_retrieval_results(self, results: list[SearchResult]) -> None:
+        """Log retrieved results after score filtering, before reranking."""
+        if not results:
+            logger.info("检索结果为空（score 过滤后无剩余）")
+            return
+
+        header = f"检索结果（共 {len(results)} 条，向量相似度排序）"
+        logger.info(header)
+        for i, result in enumerate(results):
+            logger.info(self._format_result(i, result))
+
+    def _log_reranked_results(self, results: list[SearchResult]) -> None:
+        """Log results after reranking."""
+        if not results:
+            logger.info("Rerank 结果为空")
+            return
+
+        rerank_active = self.settings.rerank_enabled
+        label = "Rerank 后结果" if rerank_active else "最终结果（未启用 Rerank）"
+        header = f"{label}（共 {len(results)} 条）"
+        logger.info(header)
+        for i, result in enumerate(results):
+            logger.info(self._format_result(i, result))

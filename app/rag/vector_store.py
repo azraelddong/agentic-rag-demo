@@ -39,6 +39,7 @@ class MilvusVectorStore:
     def client(self) -> MilvusClient:
         if self._client is None:
             try:
+                self._configure_grpc_proxy_bypass()
                 kwargs: dict[str, str] = {"uri": self.settings.milvus_uri}
                 if self.settings.milvus_user:
                     kwargs["user"] = self.settings.milvus_user
@@ -52,6 +53,27 @@ class MilvusVectorStore:
                     detail={"uri": self.settings.milvus_uri, "error": str(exc)},
                 ) from exc
         return self._client
+
+    def _configure_grpc_proxy_bypass(self) -> None:
+        configured_hosts = [
+            host.strip()
+            for host in self.settings.milvus_no_grpc_proxy.split(",")
+            if host.strip()
+        ]
+        if not configured_hosts:
+            return
+
+        existing_hosts = [
+            host.strip()
+            for host in os.environ.get("no_grpc_proxy", "").split(",")
+            if host.strip()
+        ]
+        known_hosts = {host.lower() for host in existing_hosts}
+        for host in configured_hosts:
+            if host.lower() not in known_hosts:
+                existing_hosts.append(host)
+                known_hosts.add(host.lower())
+        os.environ["no_grpc_proxy"] = ",".join(existing_hosts)
 
     def ensure_collection(self) -> None:
         try:

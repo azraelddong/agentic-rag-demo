@@ -1,5 +1,8 @@
+import os
+
 from app.core.config import Settings
 from app.rag.text_splitter import DocumentChunk
+import app.rag.vector_store as vector_store_module
 from app.rag.vector_store import MilvusVectorStore
 
 
@@ -16,6 +19,14 @@ class FakeMilvusClient:
 
     def upsert(self, *, collection_name: str, data: list[dict]) -> None:
         self.upserted_batches.append(data)
+
+
+class RecordingMilvusClient:
+    observed_no_grpc_proxy = ""
+
+    def __init__(self, **kwargs: str) -> None:
+        self.kwargs = kwargs
+        type(self).observed_no_grpc_proxy = os.environ.get("no_grpc_proxy", "")
 
 
 def make_chunk(*, file_path: str, chunk_index: int, content: str = "content") -> DocumentChunk:
@@ -66,3 +77,16 @@ def test_delete_chunks_for_files_deduplicates_and_escapes_paths() -> None:
     assert client.deleted_filters == [
         'file_path == "E:\\\\docs\\\\the \\"demo\\".md"'
     ]
+
+
+def test_client_adds_configured_milvus_host_to_grpc_proxy_bypass(monkeypatch) -> None:
+    monkeypatch.setenv("no_grpc_proxy", "existing.internal")
+    monkeypatch.setattr(vector_store_module, "MilvusClient", RecordingMilvusClient)
+    store = MilvusVectorStore(
+        Settings(milvus_no_grpc_proxy="172.28.30.108")
+    )
+
+    assert store.client is not None
+    assert RecordingMilvusClient.observed_no_grpc_proxy == (
+        "existing.internal,172.28.30.108"
+    )

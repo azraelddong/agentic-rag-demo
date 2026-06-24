@@ -53,11 +53,16 @@ class Settings(BaseSettings):
     """Reranking相关配置"""
     rerank_provider: str = "none"
     rerank_model_name: str = "bge-reranker-v2-m3"
+    rerank_base_url: str | None = None
+    rerank_api_key: str | None = None
+    rerank_top_n: int = 5
+    rerank_retrieval_k: int = 20
 
     """milvus相关配置"""
     milvus_uri: str = "http://localhost:19530"
     milvus_user: str = ""
     milvus_password: str = ""
+    milvus_no_grpc_proxy: str = ""
     milvus_collection_name: str = "agentic_rag_chunks"
     milvus_metric_type: str = "COSINE"
     milvus_index_type: str = "AUTOINDEX"
@@ -116,6 +121,24 @@ class Settings(BaseSettings):
     @property
     def effective_embedding_api_key(self) -> str:
         return self.embedding_api_key or self.llm_api_key
+
+    @property
+    def effective_rerank_base_url(self) -> str:
+        if self.rerank_base_url:
+            return self.rerank_base_url
+        provider_defaults = {
+            "siliconflow": "https://api.siliconflow.cn/v1",
+            "jina": "https://api.jina.ai/v1",
+        }
+        return provider_defaults.get(self.rerank_provider, self.llm_base_url)
+
+    @property
+    def effective_rerank_api_key(self) -> str:
+        return self.rerank_api_key or self.llm_api_key
+
+    @property
+    def rerank_enabled(self) -> bool:
+        return self.rerank_provider != "none"
 
 
 @lru_cache
