@@ -6,7 +6,7 @@ from app.llm.embedding_model import BgeM3EmbeddingModel, OpenAICompatibleEmbeddi
 from app.rag.document_loader import DocumentLoader
 from app.rag.prompt_builder import PromptBuilder
 from app.rag.rag_chain import RAGChain
-from app.rag.query_rewriter import QueryRewriter
+from app.rag.query_rewriter import MultiQueryRewriter, QueryRewriter, SimpleQueryRewriter
 from app.rag.reranker import BgeReranker, JinaReranker, NoopReranker, SiliconFlowReranker
 from app.rag.retriever import Retriever
 from app.rag.text_splitter import ChunkSplitter
@@ -67,13 +67,19 @@ def get_reranker():
         return BgeReranker()
     return NoopReranker()
 
-"""获取QueryRewriter实例，使用LLM改写用户查询以提升检索召回率。"""
+"""获取QueryRewriter实例，根据query_rewrite_method配置选择改写策略。"""
 @lru_cache
 def get_query_rewriter() -> QueryRewriter | None:
     settings = get_settings()
-    if not settings.query_rewrite_enabled:
-        return None
-    return QueryRewriter(get_chat_model().generate)
+    method = settings.query_rewrite_method
+    if method == "simple":
+        return SimpleQueryRewriter(get_chat_model().generate)
+    if method == "multi":
+        return MultiQueryRewriter(
+            get_chat_model().generate,
+            num_queries=settings.query_rewrite_multi_count,
+        )
+    return None
 
 """获取DocumentService实例，注入所需的依赖组件。"""
 @lru_cache

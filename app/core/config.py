@@ -71,7 +71,8 @@ class Settings(BaseSettings):
     rag_top_k: int = 5
     rag_score_threshold: float | None = 0.2
     query_max_chars: int = 2000
-    query_rewrite_enabled: bool = False
+    query_rewrite_method: str = "none"
+    query_rewrite_multi_count: int = 3
 
     @field_validator("allowed_document_extensions", mode="before")
     @classmethod
@@ -88,7 +89,7 @@ class Settings(BaseSettings):
     def normalize_upper(cls, value: str) -> str:
         return value.upper()
 
-    @field_validator("embedding_provider", "rerank_provider", mode="before")
+    @field_validator("embedding_provider", "rerank_provider", "query_rewrite_method", mode="before")
     @classmethod
     def normalize_provider(cls, value: str) -> str:
         return value.strip().lower().replace("-", "_")
@@ -147,6 +148,10 @@ class Settings(BaseSettings):
     @property
     def rerank_enabled(self) -> bool:
         return self.rerank_provider != "none"
+
+    @property
+    def query_rewrite_enabled(self) -> bool:
+        return self.query_rewrite_method != "none"
 
 
 @lru_cache

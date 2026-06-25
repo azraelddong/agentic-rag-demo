@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 import logging
 from typing import Any
 
@@ -36,6 +37,10 @@ class RAGChain:
         self.reranker = reranker
         self.query_rewriter = query_rewriter
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def ask(
         self,
         question: str,
@@ -45,14 +50,7 @@ class RAGChain:
     ) -> tuple[str, list[SearchResult]]:
         normalized_question = question.strip()
 
-        # Rewrite query for retrieval if enabled (keep original for LLM prompt)
-        search_query = normalized_question
-        if self.settings.query_rewrite_enabled and self.query_rewriter is not None:
-            logger.info("Query rewrite 前: \"%s\"", normalized_question)
-            search_query = self.query_rewriter.rewrite(normalized_question)
-            logger.info("Query rewrite 后: \"%s\"", search_query)
-
-        # Retrieve more candidates when reranking is enabled (M in M→N strategy)
+        # Determine retrieval budget and rerank target
         if self.settings.rerank_enabled:
             retrieval_k = top_k or self.settings.rerank_retrieval_k
             rerank_top_n = self.settings.rerank_top_n
@@ -60,26 +58,78 @@ class RAGChain:
             retrieval_k = top_k or self.settings.rag_top_k
             rerank_top_n = None
 
-        results = self.retriever.retrieve(
-            search_query,
-            top_k=retrieval_k,
-            metadata_filter=metadata_filter,
-        )
+        # --- Query rewrite step ------------------------------------------------
+        queries = [normalized_question]
+        if self.settings.query_rewrite_enabled and self.query_rewriter is not None:
+            logger.info("Query rewrite 前: \"%s\"", normalized_question)
+            queries = self.query_rewriter.rewrite(normalized_question)
+            logger.info("Query rewrite 后 (%d 个查询): %s", len(queries), queries)
+
+        # --- Multi-retrieval + dedup step --------------------------------------
+        results = self._multi_retrieve(queries, retrieval_k, metadata_filter)
         results = self._filter_by_score(results)
         self._log_retrieval_results(results)
-        results = self.reranker.rerank(search_query, results, top_n=rerank_top_n)
+        results = self.reranker.rerank(normalized_question, results, top_n=rerank_top_n)
+        # Rerank replaces vector-similarity scores with relevance scores.
+        # Filter again to remove results the reranker deemed irrelevant.
+        if self.settings.rerank_enabled:
+            results = self._filter_by_score(results)
         self._log_reranked_results(results)
 
         if not results:
             logger.info("No relevant chunks found for query")
             return NOT_FOUND_ANSWER, []
 
-        # Use the original question for the LLM, not the rewritten search query
         messages = self.prompt_builder.build_messages(normalized_question, results)
         answer = self.chat_model.generate(messages)
         if not answer:
             return NOT_FOUND_ANSWER, results
         return answer, results
+
+    # ------------------------------------------------------------------
+    # Multi-retrieval helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _chunk_fingerprint(result: SearchResult) -> str:
+        """Stable dedup key for a chunk (first 200 chars hash)."""
+        return sha256(result.text[:200].encode()).hexdigest()
+
+    def _multi_retrieve(
+        self,
+        queries: list[str],
+        retrieval_k: int,
+        metadata_filter: dict[str, Any] | None,
+    ) -> list[SearchResult]:
+        """Run retrieval for each query, then deduplicate keeping the best score."""
+        if len(queries) == 1:
+            return self.retriever.retrieve(
+                queries[0], top_k=retrieval_k, metadata_filter=metadata_filter,
+            )
+
+        # Distribute retrieval budget across queries
+        per_query_k = max(3, retrieval_k // len(queries))
+        logger.info(
+            "Multi-Query 检索：%d 个查询，每个检索 %d 条",
+            len(queries), per_query_k,
+        )
+
+        seen: dict[str, SearchResult] = {}
+        for query in queries:
+            batch = self.retriever.retrieve(
+                query, top_k=per_query_k, metadata_filter=metadata_filter,
+            )
+            for result in batch:
+                fp = self._chunk_fingerprint(result)
+                if fp not in seen or result.score > seen[fp].score:
+                    seen[fp] = result
+
+        merged = sorted(seen.values(), key=lambda r: r.score, reverse=True)
+        logger.info(
+            "Multi-Query 去重后：%d 条 → %d 条（合并前 %d 条）",
+            len(queries) * per_query_k, len(merged), sum(1 for _ in seen),
+        )
+        return merged[:retrieval_k]
 
     def _filter_by_score(self, results: list[SearchResult]) -> list[SearchResult]:
         threshold = self.settings.rag_score_threshold
