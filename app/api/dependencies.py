@@ -6,6 +6,8 @@ from app.llm.embedding_model import BgeM3EmbeddingModel, OpenAICompatibleEmbeddi
 from app.rag.document_loader import DocumentLoader
 from app.rag.prompt_builder import PromptBuilder
 from app.rag.rag_chain import RAGChain
+from app.rag.bm25_retriever import BM25Retriever
+from app.rag.hybrid_retriever import HybridRetriever
 from app.rag.query_rewriter import MultiQueryRewriter, QueryRewriter, SimpleQueryRewriter
 from app.rag.reranker import BgeReranker, JinaReranker, NoopReranker, SiliconFlowReranker
 from app.rag.retriever import Retriever
@@ -96,14 +98,29 @@ def get_document_service() -> DocumentService:
         vector_store=get_vector_store(),
     )
 
+"""获取BM25Retriever实例（keyword检索），被HybridRetriever复用。"""
+@lru_cache
+def get_bm25_retriever() -> BM25Retriever:
+    return BM25Retriever(get_vector_store())
+
+"""获取Retriever实例，根据retrieval_method配置选择检索策略。"""
+@lru_cache
+def get_retriever() -> Retriever | HybridRetriever:
+    settings = get_settings()
+    if settings.retrieval_method == "hybrid":
+        return HybridRetriever(
+            dense_retriever=Retriever(get_embedding_model(), get_vector_store()),
+            bm25_retriever=get_bm25_retriever(),
+        )
+    return Retriever(get_embedding_model(), get_vector_store())
+
 """获取ChatService实例，注入所需的依赖组件，包括RAGChain和相关的子组件。"""
 @lru_cache
 def get_chat_service() -> ChatService:
     settings = get_settings()
-    retriever = Retriever(get_embedding_model(), get_vector_store())
     rag_chain = RAGChain(
         settings=settings,
-        retriever=retriever,
+        retriever=get_retriever(),
         prompt_builder=PromptBuilder(),
         chat_model=get_chat_model(),
         reranker=get_reranker(),

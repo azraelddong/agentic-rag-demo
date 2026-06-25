@@ -138,6 +138,37 @@ class MilvusVectorStore:
                 detail={"collection": self.collection_name, "error": str(exc)},
             ) from exc
 
+    def fetch_chunks_batch(self, limit: int = 1000) -> list[dict[str, Any]]:
+        """Return all chunk texts with metadata (for BM25 / keyword index building)."""
+        self.ensure_collection()
+        self.client.load_collection(self.collection_name)
+        output_fields = [
+            "id", "text", "file_name", "file_path",
+            "chunk_index", "source_type", "created_at",
+        ]
+        chunks: list[dict[str, Any]] = []
+        offset = 0
+        try:
+            while True:
+                batch = self.client.query(
+                    collection_name=self.collection_name,
+                    filter="",
+                    output_fields=output_fields,
+                    limit=limit,
+                    offset=offset,
+                )
+                if not batch:
+                    break
+                chunks.extend(batch)
+                offset += limit
+        except Exception as exc:
+            logger.exception("Failed to fetch chunks from Milvus")
+            raise VectorStoreError(
+                "读取 Milvus 全量 chunks 失败",
+                detail={"collection": self.collection_name, "error": str(exc)},
+            ) from exc
+        return chunks
+
     def drop_collection(self) -> None:
         try:
             if self.client.has_collection(self.collection_name):

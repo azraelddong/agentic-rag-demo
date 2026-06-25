@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     rag_top_k: int = 5
     rag_score_threshold: float | None = 0.2
     query_max_chars: int = 2000
+    retrieval_method: str = "dense"
     query_rewrite_method: str = "none"
     query_rewrite_multi_count: int = 3
 
@@ -89,7 +90,7 @@ class Settings(BaseSettings):
     def normalize_upper(cls, value: str) -> str:
         return value.upper()
 
-    @field_validator("embedding_provider", "rerank_provider", "query_rewrite_method", mode="before")
+    @field_validator("embedding_provider", "rerank_provider", "retrieval_method", "query_rewrite_method", mode="before")
     @classmethod
     def normalize_provider(cls, value: str) -> str:
         return value.strip().lower().replace("-", "_")

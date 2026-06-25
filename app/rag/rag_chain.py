@@ -7,7 +7,8 @@ from typing import Any
 from app.core.config import Settings
 from app.llm.chat_model import ChatModel
 from app.rag.prompt_builder import PromptBuilder
-from app.rag.query_rewriter import QueryRewriter
+from app.rag.hybrid_retriever import HybridRetriever
+from app.rag.query_rewriter import QueryRewriter, RewriteResult
 from app.rag.reranker import Reranker
 from app.rag.retriever import Retriever
 from app.rag.vector_store import SearchResult
@@ -24,7 +25,7 @@ class RAGChain:
         self,
         *,
         settings: Settings,
-        retriever: Retriever,
+        retriever: Retriever | HybridRetriever,
         prompt_builder: PromptBuilder,
         chat_model: ChatModel,
         reranker: Reranker,
@@ -59,21 +60,25 @@ class RAGChain:
             rerank_top_n = None
 
         # --- Query rewrite step ------------------------------------------------
-        queries = [normalized_question]
+        rewrite_result = RewriteResult(queries=[normalized_question], keywords=[])
         if self.settings.query_rewrite_enabled and self.query_rewriter is not None:
             logger.info("Query rewrite 前: \"%s\"", normalized_question)
-            queries = self.query_rewriter.rewrite(normalized_question)
-            logger.info("Query rewrite 后 (%d 个查询): %s", len(queries), queries)
+            rewrite_result = self.query_rewriter.rewrite(normalized_question)
+            logger.info(
+                "Query rewrite 后: queries=%s  keywords=%s",
+                rewrite_result.queries, rewrite_result.keywords,
+            )
 
         # --- Multi-retrieval + dedup step --------------------------------------
-        results = self._multi_retrieve(queries, retrieval_k, metadata_filter)
-        results = self._filter_by_score(results)
+        # Score filtering is done inside the retriever (pre-RRF for hybrid,
+        # COSINE threshold for dense) — no separate _filter_by_score needed.
+        results = self._multi_retrieve(
+            rewrite_result.queries, retrieval_k, metadata_filter,
+            keywords=rewrite_result.keywords,
+            score_threshold=self.settings.rag_score_threshold,
+        )
         self._log_retrieval_results(results)
         results = self.reranker.rerank(normalized_question, results, top_n=rerank_top_n)
-        # Rerank replaces vector-similarity scores with relevance scores.
-        # Filter again to remove results the reranker deemed irrelevant.
-        if self.settings.rerank_enabled:
-            results = self._filter_by_score(results)
         self._log_reranked_results(results)
 
         if not results:
@@ -100,11 +105,15 @@ class RAGChain:
         queries: list[str],
         retrieval_k: int,
         metadata_filter: dict[str, Any] | None,
+        *,
+        keywords: list[str] | None = None,
+        score_threshold: float | None = None,
     ) -> list[SearchResult]:
         """Run retrieval for each query, then deduplicate keeping the best score."""
         if len(queries) == 1:
             return self.retriever.retrieve(
                 queries[0], top_k=retrieval_k, metadata_filter=metadata_filter,
+                keywords=keywords, score_threshold=score_threshold,
             )
 
         # Distribute retrieval budget across queries
@@ -118,6 +127,7 @@ class RAGChain:
         for query in queries:
             batch = self.retriever.retrieve(
                 query, top_k=per_query_k, metadata_filter=metadata_filter,
+                keywords=keywords, score_threshold=score_threshold,
             )
             for result in batch:
                 fp = self._chunk_fingerprint(result)

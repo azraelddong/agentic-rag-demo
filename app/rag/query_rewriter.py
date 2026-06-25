@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 import logging
+import re
 
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -16,96 +18,116 @@ _LC_TYPE_TO_ROLE: dict[str, str] = {
     "ai": "assistant",
 }
 
+
+@dataclass
+class RewriteResult:
+    """Structured output from query rewriting.
+
+    ``queries`` — rewritten queries for dense / semantic search.
+    ``keywords`` — extracted content-bearing terms for BM25 keyword search.
+    """
+
+    queries: list[str]
+    keywords: list[str] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.queries)
+
+
 # ---------------------------------------------------------------------------
 # Abstract base
 # ---------------------------------------------------------------------------
 
 
 class QueryRewriter(ABC):
-    """Abstract base for query rewriting strategies.
-
-    Each concrete implementation returns a list of search queries derived
-    from the original question.  The RAG chain is responsible for running
-    retrievals with each query and merging the results.
-    """
+    """Abstract base for query rewriting strategies."""
 
     @abstractmethod
-    def rewrite(self, question: str) -> list[str]:
-        """Return one or more search queries. Never returns an empty list."""
+    def rewrite(self, question: str) -> RewriteResult:
+        """Return rewritten queries + extracted keywords."""
 
 
 # ---------------------------------------------------------------------------
-# Simple (single-query) rewriter — current behaviour
+# Simple (single-query) rewriter
 # ---------------------------------------------------------------------------
 
-SIMPLE_REWRITE_SYSTEM_PROMPT = """你是一个查询优化助手。你的任务是将用户原始问题改写为更适合知识库向量检索的查询语句。
+_SIMPLE_PROMPT = """你是一个查询优化助手。将用户原始问题改写为更适合知识库向量检索的查询语句，并提取用于关键词检索的核心术语。
 
-改写规则：
-1. 补充上下文和关键实体，使查询更具体、更聚焦
-2. 使用知识库文档中可能出现的术语和关键词
-3. 保持原问题的核心意图不变
-4. 只输出改写后的问题文本，不要添加任何解释、引号或前缀"""
+输出格式（严格按此格式）：
+---QUERY---
+改写后的查询语句
+---KEYWORDS---
+关键词1 关键词2 关键词3"""
+
+_SIMPLE_USER = "原始问题：{question}"
 
 
 class SimpleQueryRewriter(QueryRewriter):
-    """Use the LLM to rewrite a single question into a retrieval-friendly form."""
+    """LLM rewrites one query + extracts keywords."""
 
     def __init__(self, generate_fn) -> None:
         self._generate = generate_fn
         self._prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", SIMPLE_REWRITE_SYSTEM_PROMPT),
-                ("user", "原始问题：{question}\n改写后的问题："),
-            ]
+            [("system", _SIMPLE_PROMPT), ("user", _SIMPLE_USER)]
         )
 
-    def rewrite(self, question: str) -> list[str]:
-        """Return the rewritten query as a single-element list."""
+    def rewrite(self, question: str) -> RewriteResult:
         try:
             llm_input = self._prompt.invoke({"question": question})
             messages: list[ChatMessage] = [
                 {"role": _LC_TYPE_TO_ROLE.get(msg.type, msg.type), "content": msg.content}
                 for msg in llm_input.messages
             ]
-            rewritten = self._generate(messages)
-            if rewritten and rewritten != question:
-                return [rewritten]
-            logger.warning("Query rewrite 返回相同或空文本，保持原始查询")
-            return [question]
+            raw = self._generate(messages)
+            return self._parse(raw, question)
         except Exception:
-            logger.exception("Query rewrite 失败，回退到原始查询")
-            return [question]
+            logger.exception("Simple rewrite 失败，回退到原始查询")
+            return RewriteResult(queries=[question], keywords=[question])
+
+    @staticmethod
+    def _parse(raw: str, fallback: str) -> RewriteResult:
+        query = _extract_section(raw, "QUERY") or fallback
+        kw_raw = _extract_section(raw, "KEYWORDS") or ""
+        keywords = _split_keywords(kw_raw) if kw_raw else [fallback]
+        return RewriteResult(queries=[query.strip()], keywords=keywords)
 
 
 # ---------------------------------------------------------------------------
-# Multi-Query rewriter — generates N diverse queries
+# Multi-Query rewriter
 # ---------------------------------------------------------------------------
 
-MULTI_QUERY_SYSTEM_PROMPT = """你是一个查询扩展助手。给定一个用户问题，生成 {num_queries} 个不同角度的查询变体，用于从知识库中检索相关文档。
+_MULTI_PROMPT = """你是一个查询扩展助手。给定一个用户问题，完成两项任务：
 
-要求：
-1. 每个查询变体从不同角度或使用不同措辞表达原始问题
-2. 使用知识库文档中可能出现的术语和同义词
-3. 保持原始问题的核心意图，但可以侧重不同方面
-4. 每行输出一个查询，不要编号、引号或解释
-5. 严格输出 {num_queries} 行，不要多也不要少"""
+1. 生成 {num_queries} 个不同角度的查询变体，用于向量语义检索
+2. 提取核心关键词，用于 BM25 关键词检索
+
+规则：
+- 每个查询变体从不同角度或措辞表达原始问题
+- 关键词只提取内容实义词（名词、术语、实体），去掉虚词和疑问词
+- 严格按以下格式输出
+
+输出格式：
+---QUERIES---
+查询变体1
+查询变体2
+查询变体3
+---KEYWORDS---
+关键词1 关键词2 关键词3"""
+
+_MULTI_USER = "原始问题：{question}"
 
 
 class MultiQueryRewriter(QueryRewriter):
-    """Use the LLM to generate multiple diverse query variants."""
+    """LLM generates multiple query variants + extracts keywords."""
 
     def __init__(self, generate_fn, *, num_queries: int = 3) -> None:
         self._generate = generate_fn
         self._num_queries = num_queries
         self._prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", MULTI_QUERY_SYSTEM_PROMPT),
-                ("user", "原始问题：{question}\n{num_queries} 个查询变体："),
-            ]
+            [("system", _MULTI_PROMPT), ("user", _MULTI_USER)]
         )
 
-    def rewrite(self, question: str) -> list[str]:
-        """Return multiple query variants, or [original] on failure."""
+    def rewrite(self, question: str) -> RewriteResult:
         try:
             llm_input = self._prompt.invoke(
                 {"question": question, "num_queries": self._num_queries}
@@ -115,30 +137,59 @@ class MultiQueryRewriter(QueryRewriter):
                 for msg in llm_input.messages
             ]
             raw = self._generate(messages)
-            queries = self._parse_queries(raw)
-            if queries:
-                return queries
-            logger.warning("Multi-Query 解析失败，回退到原始查询")
-            return [question]
+            return self._parse(raw, question)
         except Exception:
-            logger.exception("Multi-Query 生成失败，回退到原始查询")
-            return [question]
+            logger.exception("Multi rewrite 失败，回退到原始查询")
+            return RewriteResult(queries=[question], keywords=[question])
 
-    def _parse_queries(self, raw: str) -> list[str]:
-        """Parse line-delimited queries from the LLM response."""
-        raw = raw.strip()
-        lines = [line.strip() for line in raw.split("\n") if line.strip()]
-        if not lines:
-            return []
+    @staticmethod
+    def _parse(raw: str, fallback: str) -> RewriteResult:
+        queries_block = _extract_section(raw, "QUERIES")
+        kw_raw = _extract_section(raw, "KEYWORDS") or ""
+        keywords = _split_keywords(kw_raw) if kw_raw else [fallback]
 
-        # Remove common numbering prefixes like "1." / "1)" / "- "
-        cleaned: list[str] = []
-        for line in lines:
-            line = line.lstrip("•*- ").strip()
-            # Strip "1. " or "1) " or "1、" patterns
-            import re
-            line = re.sub(r"^\d+[\.\)、]\s*", "", line).strip()
-            if line:
-                cleaned.append(line)
+        if queries_block:
+            queries = _parse_query_lines(queries_block)
+            if queries:
+                return RewriteResult(queries=queries, keywords=keywords)
+        logger.warning("Multi-Query 解析失败，回退到原始查询")
+        return RewriteResult(queries=[fallback], keywords=[fallback])
 
-        return (cleaned or lines)[: self._num_queries]
+
+# ---------------------------------------------------------------------------
+# Parser helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_section(text: str, tag: str) -> str | None:
+    """Extract content between `---TAG---` and the next `---` or end of string."""
+    pattern = rf"---\s*{tag}\s*---\s*\n?(.*?)(?=---\s*\w+\s*---|$)"
+    m = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+    if not m:
+        return None
+    return m.group(1).strip()
+
+
+def _parse_query_lines(block: str) -> list[str]:
+    """Parse line-delimited queries, stripping numbering/bullets."""
+    lines = [line.strip() for line in block.split("\n") if line.strip()]
+    cleaned: list[str] = []
+    for line in lines:
+        line = line.lstrip("•*- ").strip()
+        line = re.sub(r"^\d+[\.\)、]\s*", "", line).strip()
+        if line:
+            cleaned.append(line)
+    return cleaned
+
+
+def _split_keywords(raw: str) -> list[str]:
+    """Split keyword string on whitespace / commas into a deduplicated token list."""
+    tokens = re.split(r"[\s,，、]+", raw.strip())
+    seen: set[str] = set()
+    result: list[str] = []
+    for t in tokens:
+        t = t.strip().lower()
+        if t and t not in seen:
+            seen.add(t)
+            result.append(t)
+    return result
