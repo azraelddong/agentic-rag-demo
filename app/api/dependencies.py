@@ -13,6 +13,7 @@ from app.rag.reranker import BgeReranker, JinaReranker, NoopReranker, SiliconFlo
 from app.rag.retriever import Retriever
 from app.rag.text_splitter import ChunkSplitter
 from app.rag.vector_store import MilvusVectorStore
+from app.agent.agent_service import AgentService
 from app.services.chat_service import ChatService
 from app.services.document_service import DocumentService
 
@@ -103,22 +104,34 @@ def get_document_service() -> DocumentService:
 def get_bm25_retriever() -> BM25Retriever:
     return BM25Retriever(get_vector_store())
 
+"""获取Dense Retriever实例（纯向量检索）。"""
+@lru_cache
+def get_dense_retriever() -> Retriever:
+    return Retriever(get_embedding_model(), get_vector_store())
+
+
+"""获取Hybrid Retriever实例（dense + BM25混合检索）。"""
+@lru_cache
+def get_hybrid_retriever() -> HybridRetriever:
+    return HybridRetriever(
+        dense_retriever=get_dense_retriever(),
+        bm25_retriever=get_bm25_retriever(),
+    )
+
+
 """获取Retriever实例，根据retrieval_method配置选择检索策略。"""
 @lru_cache
 def get_retriever() -> Retriever | HybridRetriever:
     settings = get_settings()
     if settings.retrieval_method == "hybrid":
-        return HybridRetriever(
-            dense_retriever=Retriever(get_embedding_model(), get_vector_store()),
-            bm25_retriever=get_bm25_retriever(),
-        )
-    return Retriever(get_embedding_model(), get_vector_store())
+        return get_hybrid_retriever()
+    return get_dense_retriever()
 
-"""获取ChatService实例，注入所需的依赖组件，包括RAGChain和相关的子组件。"""
+"""获取RAGChain实例，作为Basic RAG和Agentic RAG的共享核心链路。"""
 @lru_cache
-def get_chat_service() -> ChatService:
+def get_rag_chain() -> RAGChain:
     settings = get_settings()
-    rag_chain = RAGChain(
+    return RAGChain(
         settings=settings,
         retriever=get_retriever(),
         prompt_builder=PromptBuilder(),
@@ -126,4 +139,28 @@ def get_chat_service() -> ChatService:
         reranker=get_reranker(),
         query_rewriter=get_query_rewriter(),
     )
-    return ChatService(rag_chain)
+
+
+"""获取ChatService实例，复用共享的RAGChain实例。"""
+@lru_cache
+def get_chat_service() -> ChatService:
+    return ChatService(get_rag_chain())
+
+
+"""获取Agent专用的MultiQueryRewriter，用于retry时的强制query rewrite。"""
+@lru_cache
+def get_agent_retry_query_rewriter() -> QueryRewriter:
+    return MultiQueryRewriter(
+        get_chat_model().generate,
+        num_queries=get_settings().query_rewrite_multi_count,
+    )
+
+
+"""获取AgentService实例，注入共享RAGChain和retry专用依赖。"""
+@lru_cache
+def get_agent_service() -> AgentService:
+    return AgentService(
+        rag_chain=get_rag_chain(),
+        retry_retriever=get_hybrid_retriever(),
+        retry_query_rewriter=get_agent_retry_query_rewriter(),
+    )

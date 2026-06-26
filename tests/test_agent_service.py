@@ -128,6 +128,21 @@ class TestAgentServiceAsk:
         assert len(resp.sources) == 0
         assert resp.trace.reflection == REFLECTION_INSUFFICIENT_CONTEXT
 
+    def test_agent_service_accepts_retry_dependencies(self) -> None:
+        rag_chain = MagicMock()
+        retry_retriever = MagicMock()
+        retry_query_rewriter = MagicMock()
+
+        svc = AgentService(
+            rag_chain=rag_chain,
+            retry_retriever=retry_retriever,
+            retry_query_rewriter=retry_query_rewriter,
+        )
+
+        assert svc.rag_chain is rag_chain
+        assert svc.retry_retriever is retry_retriever
+        assert svc.retry_query_rewriter is retry_query_rewriter
+
     def test_ask_passes_top_k_and_filter(self) -> None:
         mock_chain = MagicMock()
         mock_chain.ask.return_value = ("ok", [_make_result()])
