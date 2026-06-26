@@ -84,3 +84,115 @@ def test_rag_chain_can_force_query_rewriter_override() -> None:
     rewriter.rewrite.assert_called_once_with("original question")
     retriever.retrieve.assert_called_once()
     assert retriever.retrieve.call_args.args[0] == "rewritten question"
+
+
+# ---------------------------------------------------------------------------
+# LangGraph graph behavior tests
+# ---------------------------------------------------------------------------
+
+from app.agent.constants import (
+    PLAN_RAG_SEARCH,
+    REFLECTION_INSUFFICIENT_CONTEXT,
+    REFLECTION_SUPPORTED,
+)
+from app.agent.graph import build_agentic_rag_graph
+from app.rag.rag_chain import NOT_FOUND_ANSWER
+
+
+def test_graph_finishes_after_supported_first_pass() -> None:
+    rag_chain = MagicMock()
+    rag_chain.ask.return_value = ("answer", [_result()])
+
+    graph = build_agentic_rag_graph(
+        rag_chain=rag_chain,
+        retry_retriever=MagicMock(),
+        retry_query_rewriter=MagicMock(),
+    )
+
+    state = graph.invoke(
+        {
+            "question": "q",
+            "top_k": 5,
+            "metadata_filter": None,
+            "max_iterations": 2,
+            "max_top_k": 20,
+            "trace_steps": [],
+        }
+    )
+
+    assert state["answer"] == "answer"
+    assert state["reflection"] == REFLECTION_SUPPORTED
+    assert state["iterations"] == 1
+    assert rag_chain.ask.call_count == 1
+    assert [step["node"] for step in state["trace_steps"]] == [
+        "plan",
+        "execute_rag",
+        "reflect",
+        "final",
+    ]
+
+
+def test_graph_retries_once_with_enhanced_strategy() -> None:
+    rag_chain = MagicMock()
+    rag_chain.ask.side_effect = [
+        (NOT_FOUND_ANSWER, []),
+        ("retry answer", [_result()]),
+    ]
+
+    retry_retriever = MagicMock()
+    retry_query_rewriter = MagicMock()
+
+    graph = build_agentic_rag_graph(
+        rag_chain=rag_chain,
+        retry_retriever=retry_retriever,
+        retry_query_rewriter=retry_query_rewriter,
+    )
+
+    state = graph.invoke(
+        {
+            "question": "q",
+            "top_k": 5,
+            "metadata_filter": None,
+            "max_iterations": 2,
+            "max_top_k": 20,
+            "trace_steps": [],
+        }
+    )
+
+    assert state["answer"] == "retry answer"
+    assert state["reflection"] == REFLECTION_SUPPORTED
+    assert state["iterations"] == 2
+    assert rag_chain.ask.call_count == 2
+
+    retry_call = rag_chain.ask.call_args_list[1]
+    assert retry_call.kwargs["top_k"] == 10
+    assert retry_call.kwargs["retriever_override"] is retry_retriever
+    assert retry_call.kwargs["query_rewriter_override"] is retry_query_rewriter
+    assert retry_call.kwargs["force_query_rewrite"] is True
+    assert "prepare_retry" in [step["node"] for step in state["trace_steps"]]
+
+
+def test_graph_stops_after_retry_failure() -> None:
+    rag_chain = MagicMock()
+    rag_chain.ask.return_value = (NOT_FOUND_ANSWER, [])
+
+    graph = build_agentic_rag_graph(
+        rag_chain=rag_chain,
+        retry_retriever=MagicMock(),
+        retry_query_rewriter=MagicMock(),
+    )
+
+    state = graph.invoke(
+        {
+            "question": "q",
+            "top_k": 5,
+            "metadata_filter": None,
+            "max_iterations": 2,
+            "max_top_k": 20,
+            "trace_steps": [],
+        }
+    )
+
+    assert state["reflection"] == REFLECTION_INSUFFICIENT_CONTEXT
+    assert state["iterations"] == 2
+    assert rag_chain.ask.call_count == 2
