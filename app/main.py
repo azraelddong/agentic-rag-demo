@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.agent_api import router as agent_router
 from app.api.chat_api import router as chat_router
 from app.api.document_api import router as document_router
 from app.core.config import get_settings
@@ -38,6 +39,7 @@ app.add_middleware(
 )
 
 """路由注册，将文档相关的API路由和聊天相关的API路由包含到主应用中。"""
+app.include_router(agent_router)
 app.include_router(document_router)
 app.include_router(chat_router)
 
