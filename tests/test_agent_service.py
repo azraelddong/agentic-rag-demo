@@ -1,14 +1,11 @@
-"""Unit tests for AgentService – plan / execute / reflect / final."""
+"""Unit tests for AgentService driven by LangGraph."""
 
 from unittest.mock import MagicMock
 
-import pytest
-
-from app.agent.agent_service import (
-    PLAN_RAG_SEARCH,
+from app.agent.agent_service import AgentService
+from app.agent.constants import (
     REFLECTION_INSUFFICIENT_CONTEXT,
     REFLECTION_SUPPORTED,
-    AgentService,
 )
 from app.rag.rag_chain import NOT_FOUND_ANSWER
 from app.rag.vector_store import SearchResult
@@ -27,81 +24,28 @@ def _make_result(text: str = "some chunk", score: float = 0.9) -> SearchResult:
     )
 
 
-class TestAgentServicePlan:
-    """Plan always returns 'rag_search' in the first version."""
+class TestAgentTraceSchema:
+    def test_trace_can_include_steps(self) -> None:
+        from app.schemas.agent_schema import AgentTrace, AgentTraceStep
 
-    def test_plan_returns_rag_search(self) -> None:
-        svc = AgentService(rag_chain=MagicMock())
-        assert svc._plan("任意问题") == PLAN_RAG_SEARCH
+        trace = AgentTrace(
+            plan="rag_search",
+            reflection="supported",
+            iterations=1,
+            steps=[
+                AgentTraceStep(node="plan", decision="rag_search"),
+                AgentTraceStep(node="execute_rag", source_count=1, top_k=5),
+            ],
+        )
 
-
-class TestAgentServiceReflect:
-    """Reflect uses deterministic rules — no extra LLM call."""
-
-    def test_supported_when_sources_and_valid_answer(self) -> None:
-        svc = AgentService(rag_chain=MagicMock())
-        results = [_make_result()]
-        assert svc._reflect("有意义的回答", results) == REFLECTION_SUPPORTED
-
-    def test_insufficient_context_when_no_sources(self) -> None:
-        svc = AgentService(rag_chain=MagicMock())
-        assert svc._reflect("有意义的回答", []) == REFLECTION_INSUFFICIENT_CONTEXT
-
-    def test_insufficient_context_when_not_found_answer(self) -> None:
-        svc = AgentService(rag_chain=MagicMock())
-        results = [_make_result()]
-        assert svc._reflect(NOT_FOUND_ANSWER, results) == REFLECTION_INSUFFICIENT_CONTEXT
-
-    def test_insufficient_context_when_no_sources_and_not_found(self) -> None:
-        svc = AgentService(rag_chain=MagicMock())
-        assert svc._reflect(NOT_FOUND_ANSWER, []) == REFLECTION_INSUFFICIENT_CONTEXT
-
-
-class TestAgentServiceFinal:
-    """Final assembles answer + sources + trace correctly."""
-
-    def test_response_contains_answer_sources_trace(self) -> None:
-        svc = AgentService(rag_chain=MagicMock())
-        results = [_make_result(score=0.85)]
-        response = svc._final("答案", results, PLAN_RAG_SEARCH, REFLECTION_SUPPORTED)
-
-        assert response.answer == "答案"
-        assert len(response.sources) == 1
-        assert response.sources[0].file_name == "test.md"
-        assert response.sources[0].score == 0.85
-        assert response.trace.plan == PLAN_RAG_SEARCH
-        assert response.trace.reflection == REFLECTION_SUPPORTED
-        assert response.trace.iterations == 1
-
-
-def test_trace_can_include_steps() -> None:
-    from app.schemas.agent_schema import AgentTrace, AgentTraceStep
-
-    trace = AgentTrace(
-        plan="rag_search",
-        reflection="supported",
-        iterations=1,
-        steps=[
-            AgentTraceStep(
-                node="plan",
-                decision="rag_search",
-            ),
-            AgentTraceStep(
-                node="execute_rag",
-                source_count=1,
-                top_k=5,
-            ),
-        ],
-    )
-
-    assert trace.steps[0].node == "plan"
-    assert trace.steps[0].decision == "rag_search"
-    assert trace.steps[1].source_count == 1
-    assert trace.steps[1].top_k == 5
+        assert trace.steps[0].node == "plan"
+        assert trace.steps[0].decision == "rag_search"
+        assert trace.steps[1].source_count == 1
+        assert trace.steps[1].top_k == 5
 
 
 class TestAgentServiceAsk:
-    """End-to-end ask() with a mocked RAGChain."""
+    """End-to-end ask() with a mocked RAGChain, driven by LangGraph."""
 
     def test_ask_supported_flow(self) -> None:
         mock_chain = MagicMock()
@@ -110,15 +54,17 @@ class TestAgentServiceAsk:
         svc = AgentService(rag_chain=mock_chain)
         resp = svc.ask(question="测试问题")
 
-        mock_chain.ask.assert_called_once()
+        assert mock_chain.ask.call_count == 1
         assert resp.answer == "这是一个回答"
         assert len(resp.sources) == 1
-        assert resp.trace.plan == PLAN_RAG_SEARCH
+        assert resp.trace.plan == "rag_search"
         assert resp.trace.reflection == REFLECTION_SUPPORTED
         assert resp.trace.iterations == 1
+        assert len(resp.trace.steps) > 0
 
     def test_ask_insufficient_context_flow(self) -> None:
         mock_chain = MagicMock()
+        mock_chain.settings.rag_top_k = 5
         mock_chain.ask.return_value = (NOT_FOUND_ANSWER, [])
 
         svc = AgentService(rag_chain=mock_chain)
@@ -127,6 +73,7 @@ class TestAgentServiceAsk:
         assert resp.answer == NOT_FOUND_ANSWER
         assert len(resp.sources) == 0
         assert resp.trace.reflection == REFLECTION_INSUFFICIENT_CONTEXT
+        assert len(resp.trace.steps) > 0
 
     def test_agent_service_accepts_retry_dependencies(self) -> None:
         rag_chain = MagicMock()
@@ -153,3 +100,40 @@ class TestAgentServiceAsk:
         call_kwargs = mock_chain.ask.call_args.kwargs
         assert call_kwargs["top_k"] == 3
         assert call_kwargs["metadata_filter"] == {"source_type": "pdf"}
+
+    def test_ask_retries_once_when_context_is_insufficient(self) -> None:
+        mock_chain = MagicMock()
+        mock_chain.ask.side_effect = [
+            (NOT_FOUND_ANSWER, []),
+            ("第二轮回答", [_make_result()]),
+        ]
+
+        retry_retriever = MagicMock()
+        retry_query_rewriter = MagicMock()
+
+        svc = AgentService(
+            rag_chain=mock_chain,
+            retry_retriever=retry_retriever,
+            retry_query_rewriter=retry_query_rewriter,
+        )
+
+        resp = svc.ask(question="测试问题", top_k=5)
+
+        assert resp.answer == "第二轮回答"
+        assert resp.trace.iterations == 2
+        assert resp.trace.reflection == REFLECTION_SUPPORTED
+        assert [step.node for step in resp.trace.steps] == [
+            "plan",
+            "execute_rag",
+            "reflect",
+            "prepare_retry",
+            "execute_rag",
+            "reflect",
+            "final",
+        ]
+
+        retry_call = mock_chain.ask.call_args_list[1]
+        assert retry_call.kwargs["top_k"] == 10
+        assert retry_call.kwargs["retriever_override"] is retry_retriever
+        assert retry_call.kwargs["query_rewriter_override"] is retry_query_rewriter
+        assert retry_call.kwargs["force_query_rewrite"] is True
