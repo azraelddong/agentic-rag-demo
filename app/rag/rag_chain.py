@@ -48,8 +48,20 @@ class RAGChain:
         *,
         top_k: int | None = None,
         metadata_filter: dict[str, Any] | None = None,
+        retriever_override: Retriever | HybridRetriever | None = None,
+        query_rewriter_override: QueryRewriter | None = None,
+        force_query_rewrite: bool | None = None,
     ) -> tuple[str, list[SearchResult]]:
         normalized_question = question.strip()
+
+        # Select active retriever and rewriter (allow per-call overrides)
+        active_retriever = retriever_override or self.retriever
+        active_query_rewriter = query_rewriter_override or self.query_rewriter
+        rewrite_enabled = (
+            force_query_rewrite
+            if force_query_rewrite is not None
+            else self.settings.query_rewrite_enabled
+        )
 
         # Determine retrieval budget and rerank target
         if self.settings.rerank_enabled:
@@ -61,9 +73,9 @@ class RAGChain:
 
         # --- Query rewrite step ------------------------------------------------
         rewrite_result = RewriteResult(queries=[normalized_question], keywords=[])
-        if self.settings.query_rewrite_enabled and self.query_rewriter is not None:
+        if rewrite_enabled and active_query_rewriter is not None:
             logger.info("Query rewrite 前: \"%s\"", normalized_question)
-            rewrite_result = self.query_rewriter.rewrite(normalized_question)
+            rewrite_result = active_query_rewriter.rewrite(normalized_question)
             logger.info(
                 "Query rewrite 后: queries=%s  keywords=%s",
                 rewrite_result.queries, rewrite_result.keywords,
@@ -73,7 +85,10 @@ class RAGChain:
         # Score filtering is done inside the retriever (pre-RRF for hybrid,
         # COSINE threshold for dense) — no separate _filter_by_score needed.
         results = self._multi_retrieve(
-            rewrite_result.queries, retrieval_k, metadata_filter,
+            active_retriever,
+            rewrite_result.queries,
+            retrieval_k,
+            metadata_filter,
             keywords=rewrite_result.keywords,
             score_threshold=self.settings.rag_score_threshold,
         )
@@ -102,6 +117,7 @@ class RAGChain:
 
     def _multi_retrieve(
         self,
+        retriever: Retriever | HybridRetriever,
         queries: list[str],
         retrieval_k: int,
         metadata_filter: dict[str, Any] | None,
@@ -111,7 +127,7 @@ class RAGChain:
     ) -> list[SearchResult]:
         """Run retrieval for each query, then deduplicate keeping the best score."""
         if len(queries) == 1:
-            return self.retriever.retrieve(
+            return retriever.retrieve(
                 queries[0], top_k=retrieval_k, metadata_filter=metadata_filter,
                 keywords=keywords, score_threshold=score_threshold,
             )
@@ -125,7 +141,7 @@ class RAGChain:
 
         seen: dict[str, SearchResult] = {}
         for query in queries:
-            batch = self.retriever.retrieve(
+            batch = retriever.retrieve(
                 query, top_k=per_query_k, metadata_filter=metadata_filter,
                 keywords=keywords, score_threshold=score_threshold,
             )
