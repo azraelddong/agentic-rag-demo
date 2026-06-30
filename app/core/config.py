@@ -75,6 +75,16 @@ class Settings(BaseSettings):
     query_rewrite_method: str = "none"
     query_rewrite_multi_count: int = 3
 
+    """Redis / short-term memory settings"""
+    redis_url: str = "redis://localhost:6379/0"
+    redis_session_ttl: int = Field(
+        default=3600,
+        description="TTL in seconds for session memory keys",
+        ge=60,
+        le=86400,
+    )
+    redis_session_prefix: str = "mem:session"
+
     @field_validator("allowed_document_extensions", mode="before")
     @classmethod
     def parse_extensions(cls, value: Any) -> list[str]:

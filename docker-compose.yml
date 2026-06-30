@@ -71,6 +71,19 @@ services:
       milvus:
         condition: service_healthy
 
+  redis:
+    image: redis:7-alpine
+    container_name: agentic-rag-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
 networks:
   default:
     name: agentic-rag-network
