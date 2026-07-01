@@ -88,6 +88,48 @@ class TestAgentApiResponseShape:
         ]
 
 
+    def test_response_includes_session_id_when_provided(self) -> None:
+        """传 session_id 时，响应应回显该 session_id。"""
+        with (
+            _mock_rag_chain_ask(),
+            patch(
+                "app.core.memory.conversation_memory.ConversationMemory.load_messages",
+                return_value=[],
+            ),
+            patch(
+                "app.core.memory.conversation_memory.ConversationMemory.save_messages",
+            ),
+        ):
+            client = TestClient(app)
+            resp = client.post(
+                "/api/agent/ask",
+                json={"question": "测试", "session_id": "demo-001"},
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["session_id"] == "demo-001"
+
+    def test_response_session_id_null_when_not_provided(self) -> None:
+        """不传 session_id 时，响应中 session_id 应为 null。"""
+        with _mock_rag_chain_ask():
+            client = TestClient(app)
+            resp = client.post("/api/agent/ask", json={"question": "测试"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["session_id"] is None
+
+    def test_session_id_empty_string_rejected(self) -> None:
+        """空字符串 session_id 被拒绝（min_length=1）。"""
+        client = TestClient(app)
+        resp = client.post(
+            "/api/agent/ask",
+            json={"question": "测试", "session_id": ""},
+        )
+        assert resp.status_code == 422
+
+
 class TestChatApiUnaffected:
     """Confirm /api/chat/ask still works after Agent changes."""
 

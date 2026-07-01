@@ -14,6 +14,8 @@ from app.rag.retriever import Retriever
 from app.rag.text_splitter import ChunkSplitter
 from app.rag.vector_store import MilvusVectorStore
 from app.agent.agent_service import AgentService
+from app.core.memory.conversation_memory import ConversationMemory
+from app.core.memory.session_store import RedisSessionStore
 from app.services.chat_service import ChatService
 from app.services.document_service import DocumentService
 
@@ -156,11 +158,30 @@ def get_agent_retry_query_rewriter() -> QueryRewriter:
     )
 
 
-"""获取AgentService实例，注入共享RAGChain和retry专用依赖。"""
+"""获取RedisSessionStore单例，所有会话记忆共享同一个 Redis 连接。"""
+@lru_cache
+def get_session_store() -> RedisSessionStore:
+    settings = get_settings()
+    return RedisSessionStore(
+        redis_url=settings.redis_url,
+        password=settings.redis_password,
+        default_ttl=settings.redis_session_ttl,
+        key_prefix=settings.redis_session_prefix,
+    )
+
+
+"""获取ConversationMemory单例，注入RedisSessionStore。"""
+@lru_cache
+def get_conversation_memory() -> ConversationMemory:
+    return ConversationMemory(store=get_session_store())
+
+
+"""获取AgentService实例，注入共享RAGChain、retry专用依赖和会话记忆。"""
 @lru_cache
 def get_agent_service() -> AgentService:
     return AgentService(
         rag_chain=get_rag_chain(),
         retry_retriever=get_hybrid_retriever(),
         retry_query_rewriter=get_agent_retry_query_rewriter(),
+        memory=get_conversation_memory(),
     )

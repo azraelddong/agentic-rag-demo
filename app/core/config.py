@@ -77,6 +77,7 @@ class Settings(BaseSettings):
 
     """Redis / short-term memory settings"""
     redis_url: str = "redis://localhost:6379/0"
+    redis_password: str = ""
     redis_session_ttl: int = Field(
         default=3600,
         description="TTL in seconds for session memory keys",

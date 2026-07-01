@@ -28,6 +28,7 @@ import json
 import logging
 import math
 import os
+import sys
 from datetime import datetime, timezone
 from typing import Annotated, Any, Callable
 
@@ -39,6 +40,21 @@ from langchain.tools import tool
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from pydantic import Field
+
+# 确保项目根目录在 sys.path 中 —— 直接运行 demo/simple_agent.py 时
+# Python 会把 sys.path[0] 设为脚本所在目录 demo/，导致 app 模块找不到
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+# ---------------------------------------------------------------------------
+# 记忆模块（Redis 会话记忆）
+# ---------------------------------------------------------------------------
+try:
+    from app.core.memory import ConversationMemory, RedisSessionStore
+    _MEMORY_AVAILABLE = True
+except ImportError:
+    _MEMORY_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -593,7 +609,57 @@ def build_agent():
 
 
 # ===================================================================
-# 7. 交互式运行
+# 7. 构建会话记忆
+# ===================================================================
+
+def build_memory() -> tuple[ConversationMemory | None, str]:
+    """构建 Redis 会话记忆实例。
+
+    如果 Redis 不可用，返回 None 并回退到无记忆模式。
+
+    Returns:
+        (memory, session_id) — memory 为 None 表示降级为无记忆模式。
+    """
+    if not _MEMORY_AVAILABLE:
+        print("⚠️  记忆模块未安装（app.core.memory），将以无记忆模式运行")
+        return None, ""
+
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    redis_password = os.getenv("REDIS_PASSWORD", "")
+    ttl = int(os.getenv("REDIS_SESSION_TTL", "3600"))
+
+    # 尝试连接 Redis
+    try:
+        store = RedisSessionStore(
+            redis_url=redis_url,
+            password=redis_password,
+            default_ttl=ttl,
+        )
+        store.client.ping()
+    except Exception as exc:
+        print(f"⚠️  Redis 连接失败 ({exc})，将以无记忆模式运行")
+        print(f"   启动 Redis: docker compose up -d redis")
+        return None, ""
+
+    memory = ConversationMemory(store=store)
+
+    # 生成默认 session_id
+    default_id = f"demo-{datetime.now().strftime('%Y%m%d')}"
+    custom = input(f"📝 Session ID (回车用默认 '{default_id}'): ").strip()
+    session_id = custom if custom else default_id
+
+    # 检查是否为已有会话
+    if memory.session_exists(session_id):
+        msg_count = memory.get_message_count(session_id)
+        print(f"📂 恢复已有会话 '{session_id}'（{msg_count} 条历史消息）")
+    else:
+        print(f"🆕 新建会话 '{session_id}'")
+
+    return memory, session_id
+
+
+# ===================================================================
+# 8. 交互式运行
 # ===================================================================
 
 def _print_separator(char: str = "─", width: int = 60) -> None:
@@ -601,16 +667,30 @@ def _print_separator(char: str = "─", width: int = 60) -> None:
 
 
 def main() -> None:
-    """交互式 Agent 对话循环。每次对话打印工具调用详情。"""
+    """交互式 Agent 对话循环，集成 Redis 会话记忆。
+
+    每次对话自动加载历史消息并追加当前输入，agent 可在多轮对话中保持上下文。
+
+    特殊命令:
+        /clear   — 清除当前会话记忆
+        /memory  — 查看会话记忆状态
+        /help    — 显示帮助
+    """
     _print_separator()
-    print("🤖 简易 LangChain Agent 示例（含工具调用监控）")
+    print("🤖 简易 LangChain Agent 示例（含工具调用监控 + Redis 会话记忆）")
     print(f"   模型: {os.getenv('LLM_MODEL_NAME', 'gpt-4o-mini')}")
     print("   可用工具: calculator, get_current_datetime, word_count, json_formatter, get_weather, web_scraper")
     _print_separator()
-    print("输入问题开始对话，输入 quit / exit / q 退出")
-    _print_separator()
 
     agent = build_agent()
+    memory, session_id = build_memory()
+
+    if memory:
+        print("🧠 记忆模式: Redis 会话记忆（多轮上下文保持）")
+    else:
+        print("🧠 记忆模式: 无记忆（每轮独立）")
+    print("输入问题开始对话，/help 查看命令，quit / exit / q 退出")
+    _print_separator()
 
     while True:
         try:
@@ -621,25 +701,87 @@ def main() -> None:
 
         if not user_input:
             continue
+
+        # ---- 退出命令 ----
         if user_input.lower() in ("quit", "exit", "q"):
             print("👋 再见！")
             break
 
+        # ---- /clear: 清除会话记忆 ----
+        if user_input.strip() == "/clear":
+            if memory:
+                memory.clear(session_id)
+                print("🧹 会话记忆已清除，开始全新对话。")
+            else:
+                print("⚠️  无记忆模式，无需清除。")
+            continue
+
+        # ---- /memory: 查看记忆状态 ----
+        if user_input.strip() == "/memory":
+            if memory and memory.session_exists(session_id):
+                meta = memory.load_metadata(session_id)
+                msg_count = memory.get_message_count(session_id)
+                print(f"📊 会话记忆状态:")
+                print(f"   Session ID:    {session_id}")
+                print(f"   消息总数:      {msg_count}")
+                print(f"   总轮数:        {meta.get('total_turns', '?')}")
+                print(f"   存储消息数:     {meta.get('stored_messages', '?')}")
+                print(f"   可信度:        {meta.get('confidence', '?')}")
+                print(f"   创建时间:      {meta.get('created_at', '?')}")
+                print(f"   最后更新:      {meta.get('updated_at', '?')}")
+                print(f"   状态:          {meta.get('status', '?')}")
+                print(f"   数据版本:      {meta.get('version', '?')}")
+                ttl = int(os.getenv("REDIS_SESSION_TTL", "3600"))
+                print(f"   TTL 设置:      {ttl}s ({ttl // 60} 分钟)")
+            elif memory:
+                print(f"📊 会话 '{session_id}' 暂无记忆数据。")
+            else:
+                print("⚠️  无记忆模式，无会话状态。")
+            continue
+
+        # ---- /help: 显示帮助 ----
+        if user_input.strip() == "/help":
+            print("可用命令:")
+            print("  /clear   — 清除当前会话记忆，开始全新对话")
+            print("  /memory  — 查看会话记忆状态（消息数、轮数、可信度等）")
+            print("  /help    — 显示此帮助")
+            print("  quit / exit / q  — 退出")
+            print()
+            print("直接输入问题即可开始对话。agent 会记住本轮对话上下文。")
+            continue
+
+        # ---- 正常对话流程 ----
         print("🤖 Agent 思考中...")
         _print_separator()
 
         try:
-            result = agent.invoke(
-                {"messages": [HumanMessage(content=user_input)]}
-            )
+            # 加载历史消息（有记忆模式）或使用空列表（无记忆模式）
+            if memory:
+                history = memory.load_messages(session_id)
+            else:
+                history = []
+
+            # 追加当前用户消息
+            messages = history + [HumanMessage(content=user_input)]
+
+            # 调用 agent
+            result = agent.invoke({"messages": messages})
+
+            # 提取本次对话产生的完整消息列表并持久化
+            all_messages = result.get("messages", [])
+            if memory:
+                try:
+                    memory.save_messages(session_id, all_messages)
+                except Exception as exc:
+                    logger.warning("⚠️  保存会话记忆失败: %s", exc)
+
         except Exception as exc:
             print(f"❌ Agent 调用失败: {exc}")
             continue
 
         # 提取最终回答
-        messages = result.get("messages", [])
         final_answer = None
-        for msg in reversed(messages):
+        for msg in reversed(all_messages):
             if hasattr(msg, "content") and msg.type == "ai" and msg.content:
                 final_answer = msg.content
                 break
@@ -651,15 +793,20 @@ def main() -> None:
 
         # 汇总工具调用
         tool_msgs = [
-            msg for msg in messages
+            msg for msg in all_messages
             if hasattr(msg, "type") and msg.type == "tool"
         ]
         ai_with_tool_calls = [
-            msg for msg in messages
+            msg for msg in all_messages
             if hasattr(msg, "tool_calls") and msg.tool_calls
         ]
         if ai_with_tool_calls:
             print(f"\n📊 本轮工具调用: {len(ai_with_tool_calls)} 次 LLM 决策 → {len(tool_msgs)} 次实际执行")
+
+        # 显示记忆状态
+        if memory and memory.session_exists(session_id):
+            msg_count = memory.get_message_count(session_id)
+            print(f"🧠 会话记忆: {msg_count} 条消息 | 会话: {session_id}")
 
 
 if __name__ == "__main__":

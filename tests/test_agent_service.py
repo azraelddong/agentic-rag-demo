@@ -24,6 +24,97 @@ def _make_result(text: str = "some chunk", score: float = 0.9) -> SearchResult:
     )
 
 
+class TestAgentServiceWithMemory:
+    """AgentService + ConversationMemory 集成测试。"""
+
+    def test_ask_without_session_id_skips_memory(self) -> None:
+        """不传 session_id 时，不读写 Redis，行为与之前完全一致。"""
+        mock_chain = MagicMock()
+        mock_chain.ask.return_value = ("回答", [_make_result()])
+
+        mock_memory = MagicMock()
+        svc = AgentService(rag_chain=mock_chain, memory=mock_memory)
+        resp = svc.ask(question="测试")
+
+        assert resp.session_id is None
+        mock_memory.load_messages.assert_not_called()
+        mock_memory.save_messages.assert_not_called()
+
+    def test_ask_with_session_id_loads_and_saves(self) -> None:
+        """传 session_id 时，加载历史 → 执行 → 持久化。"""
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        mock_chain = MagicMock()
+        mock_chain.ask.return_value = ("新回答", [_make_result()])
+
+        mock_memory = MagicMock()
+        mock_memory.load_messages.return_value = [
+            HumanMessage(content="之前的问题"),
+            AIMessage(content="之前的回答"),
+        ]
+
+        svc = AgentService(rag_chain=mock_chain, memory=mock_memory)
+        resp = svc.ask(question="当前问题", session_id="demo-001")
+
+        # 验证加载了历史（被调用两次：构建上下文 + 保存前加载）
+        assert mock_memory.load_messages.call_count == 2
+        mock_memory.load_messages.assert_any_call("demo-001")
+        # 验证问题被注入了上下文
+        call_args = mock_chain.ask.call_args
+        enriched = call_args.kwargs.get("question") or call_args.args[0]
+        assert "之前的问题" in enriched
+        assert "当前问题" in enriched
+        # 验证持久化：新增了一轮 human + ai
+        save_call = mock_memory.save_messages.call_args
+        saved_msgs = save_call[0][1]  # args: (session_id, messages)
+        assert len(saved_msgs) == 4  # 2 历史 + 2 新
+        assert saved_msgs[-2].content == "当前问题"
+        assert saved_msgs[-1].content == "新回答"
+        # 验证响应
+        assert resp.session_id == "demo-001"
+
+    def test_ask_new_session_no_context_injection(self) -> None:
+        """全新会话（无历史消息），问题不应被注入上下文前缀。"""
+        mock_chain = MagicMock()
+        mock_chain.ask.return_value = ("回答", [_make_result()])
+
+        mock_memory = MagicMock()
+        mock_memory.load_messages.return_value = []  # 无历史
+
+        svc = AgentService(rag_chain=mock_chain, memory=mock_memory)
+        svc.ask(question="新会话问题", session_id="new-session")
+
+        call_args = mock_chain.ask.call_args
+        enriched = call_args.kwargs.get("question") or call_args.args[0]
+        # 新会话不应有 "以下是之前的对话历史"
+        assert "以下是之前的对话历史" not in enriched
+        assert enriched == "新会话问题"
+
+    def test_agent_service_accepts_memory(self) -> None:
+        """构造器应接受并保存 memory 实例。"""
+        mock_memory = MagicMock()
+        svc = AgentService(rag_chain=MagicMock(), memory=mock_memory)
+        assert svc.memory is mock_memory
+
+    def test_context_block_truncates_to_max_turns(self) -> None:
+        """_build_context_block 仅保留最近 N 轮。"""
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        # 10 轮 = 20 条消息，max_turns=5 → 应只保留最后 10 条
+        msgs = []
+        for i in range(10):
+            msgs.append(HumanMessage(content=f"Q{i}"))
+            msgs.append(AIMessage(content=f"A{i}"))
+
+        block = AgentService._build_context_block(msgs, max_turns=5)
+        # 最早的消息不应出现
+        assert "Q0" not in block
+        assert "A0" not in block
+        # 最近的消息应出现
+        assert "Q9" in block
+        assert "A9" in block
+
+
 class TestAgentTraceSchema:
     def test_trace_can_include_steps(self) -> None:
         from app.schemas.agent_schema import AgentTrace, AgentTraceStep

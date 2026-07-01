@@ -24,6 +24,7 @@ def ask(
 
     return agent_service.ask(
         question=request.question,
+        session_id=request.session_id,
         top_k=request.top_k,
         metadata_filter=request.metadata_filter,
     )

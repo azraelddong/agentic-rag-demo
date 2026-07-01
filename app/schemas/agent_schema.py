@@ -9,6 +9,12 @@ class AgentRequest(BaseModel):
     """Agent ask request – fields kept consistent with ChatRequest."""
 
     question: str = Field(..., min_length=1, max_length=2000, description="用户问题")
+    session_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description="会话 ID，用于 Redis 多轮对话记忆。不传则每次都是独立请求（无记忆）。",
+    )
     top_k: int | None = Field(default=None, ge=1, le=20, description="检索召回数量")
     metadata_filter: dict[str, Any] | None = Field(
         default=None,
@@ -48,3 +54,7 @@ class AgentResponse(BaseModel):
     answer: str
     sources: list[Source]
     trace: AgentTrace
+    session_id: str | None = Field(
+        default=None,
+        description="当前会话 ID（仅当请求传入了 session_id 时返回）",
+    )

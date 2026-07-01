@@ -36,10 +36,16 @@ class RedisSessionStore:
     def __init__(
         self,
         redis_url: str = "redis://localhost:6379/0",
+        password: str = "",
         default_ttl: int = 3600,
         key_prefix: str = "mem:session",
     ) -> None:
-        self.client = redis.Redis.from_url(redis_url, decode_responses=True)
+        # 密码优先从独立参数取，其次从 URL 中解析
+        self.client = redis.Redis.from_url(
+            redis_url,
+            password=password or None,
+            decode_responses=True,
+        )
         self.default_ttl = default_ttl
         self.key_prefix = key_prefix
 
