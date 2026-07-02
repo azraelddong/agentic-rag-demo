@@ -21,6 +21,8 @@ from app.schemas.chat_schema import Source
 
 if TYPE_CHECKING:
     from app.core.memory.conversation_memory import ConversationMemory
+    from app.core.memory.gatekeeper import MemoryGatekeeper
+    from app.core.memory.entry_models import TurnToolInfo
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +49,13 @@ class AgentService:
         retry_retriever: Retriever | HybridRetriever | None = None,
         retry_query_rewriter: QueryRewriter | None = None,
         memory: ConversationMemory | None = None,
+        gatekeeper: MemoryGatekeeper | None = None,
     ) -> None:
         self.rag_chain = rag_chain
         self.retry_retriever = retry_retriever
         self.retry_query_rewriter = retry_query_rewriter
         self.memory = memory
+        self.gatekeeper = gatekeeper
         self.graph = build_agentic_rag_graph(
             rag_chain=rag_chain,
             retry_retriever=retry_retriever,
@@ -104,6 +108,24 @@ class AgentService:
             past.append(AIMessage(content=answer))
             self.memory.save_messages(session_id, past)
 
+        # ── Gatekeeper: 结构化记忆提取 ─────────────────────────
+        if session_id and self.gatekeeper:
+            try:
+                tool_info = self._extract_tool_info(state)
+                self.gatekeeper.process_turn(
+                    session_id=session_id,
+                    turn_index=state.get("iterations", 0),
+                    user_message=question,
+                    assistant_message=answer,
+                    tool_info=tool_info,
+                )
+            except Exception:
+                logger.warning(
+                    "GATEKEEPER  process_turn failed for session=%s",
+                    session_id,
+                    exc_info=True,
+                )
+
         return AgentResponse(
             answer=answer,
             sources=self._build_sources(state.get("results", [])),
@@ -150,6 +172,37 @@ class AgentService:
                 )
             )
         return sources
+
+    @staticmethod
+    def _extract_tool_info(state: dict[str, Any]) -> TurnToolInfo:
+        """从 LangGraph state 中提取工具调用信息供 Gatekeeper 使用。
+
+        与 demo agent 不同，API agent 使用 RAG 检索节点而非 LangChain tools。
+        这里从 trace_steps 中提取检索次数、是否重试等关键信息。
+        """
+        from app.core.memory.entry_models import TurnToolInfo
+
+        trace_steps: list[dict] = state.get("trace_steps", [])
+        iterations = state.get("iterations", 0)
+        plan = state.get("plan", "")
+
+        tool_name = "rag_search"
+        success = bool(state.get("answer") and state.get("answer") != NOT_FOUND_ANSWER)
+        error_msg = None if success else state.get("reflection", "")
+
+        # 构建结果预览
+        result_count = 0
+        for step in trace_steps:
+            result_count += step.get("source_count", 0)
+        result_preview = f"检索 {result_count} 篇文档, 迭代 {iterations} 次, 策略: {plan}"
+
+        return TurnToolInfo(
+            tool_name=tool_name,
+            args={"plan": plan, "iterations": iterations},
+            result_preview=result_preview[:500],
+            success=success,
+            error_message=error_msg,
+        )
 
 
 # ------------------------------------------------------------------

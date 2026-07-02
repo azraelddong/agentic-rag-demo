@@ -104,7 +104,7 @@ class ConversationMemory:
         trimmed_dicts = [message_to_dict(m) for m in trimmed]
 
         # 序列化写入 Redis
-        self.store.set(session_id, SUB_KEY_MESSAGES, json.dumps(trimmed_dicts))
+        self.store.set(session_id, SUB_KEY_MESSAGES, json.dumps(trimmed_dicts, ensure_ascii=False))
 
         # 更新元数据
         self._update_metadata(session_id, messages, trimmed)
@@ -196,7 +196,7 @@ class ConversationMemory:
         meta["total_turns"] = sum(1 for m in all_messages if _msg_type(m) == "human")
         meta["stored_messages"] = len(stored)
 
-        self.store.set(session_id, SUB_KEY_METADATA, json.dumps(meta))
+        self.store.set(session_id, SUB_KEY_METADATA, json.dumps(meta, ensure_ascii=False))
 
 
 # ------------------------------------------------------------------

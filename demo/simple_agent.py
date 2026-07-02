@@ -48,13 +48,19 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 # ---------------------------------------------------------------------------
-# 记忆模块（Redis 会话记忆）
+# 记忆模块（Redis 会话记忆 + Gatekeeper 结构化条目）
 # ---------------------------------------------------------------------------
 try:
-    from app.core.memory import ConversationMemory, RedisSessionStore
+    from app.core.memory import (
+        ConversationMemory, RedisSessionStore,
+        MemoryGatekeeper, MemoryClassifier, TurnToolInfo,
+    )
     _MEMORY_AVAILABLE = True
 except ImportError:
     _MEMORY_AVAILABLE = False
+    MemoryGatekeeper = None  # type: ignore[assignment,misc]
+    MemoryClassifier = None  # type: ignore[assignment,misc]
+    TurnToolInfo = None       # type: ignore[assignment,misc]
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -612,17 +618,18 @@ def build_agent():
 # 7. 构建会话记忆
 # ===================================================================
 
-def build_memory() -> tuple[ConversationMemory | None, str]:
-    """构建 Redis 会话记忆实例。
+def build_memory() -> tuple[ConversationMemory | None, object | None, str]:
+    """构建 Redis 会话记忆 + 可选 Gatekeeper 实例。
 
     如果 Redis 不可用，返回 None 并回退到无记忆模式。
+    如果 GATEKEEPER_ENABLED=true，同时构建 MemoryGatekeeper。
 
     Returns:
-        (memory, session_id) — memory 为 None 表示降级为无记忆模式。
+        (memory, gatekeeper, session_id) — memory 为 None 表示降级为无记忆模式。
     """
     if not _MEMORY_AVAILABLE:
         print("⚠️  记忆模块未安装（app.core.memory），将以无记忆模式运行")
-        return None, ""
+        return None, None, ""
 
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     redis_password = os.getenv("REDIS_PASSWORD", "")
@@ -639,9 +646,30 @@ def build_memory() -> tuple[ConversationMemory | None, str]:
     except Exception as exc:
         print(f"⚠️  Redis 连接失败 ({exc})，将以无记忆模式运行")
         print(f"   启动 Redis: docker compose up -d redis")
-        return None, ""
+        return None, None, ""
 
     memory = ConversationMemory(store=store)
+
+    # ── 可选: 构建 Gatekeeper ──────────────────────────────────────
+    gatekeeper = None
+    if os.getenv("GATEKEEPER_ENABLED", "").lower() in ("1", "true", "yes"):
+        if MemoryGatekeeper is not None:
+            entry_ttl = int(os.getenv("REDIS_ENTRY_TTL", "2592000"))
+            entry_store = RedisSessionStore(
+                redis_url=redis_url,
+                password=redis_password,
+                default_ttl=entry_ttl,
+                key_prefix="mem:entry",
+            )
+            # 复用 demo agent 的 LLM 实例作为分类器后端
+            llm = _build_llm()
+            classifier = MemoryClassifier(
+                llm_func=lambda prompt: llm.invoke(prompt).content,
+            )
+            gatekeeper = MemoryGatekeeper(store=entry_store, classifier=classifier)
+            print("🛡️  Gatekeeper 已启用（结构化记忆准入过滤）")
+        else:
+            print("⚠️  Gatekeeper 模块不可用，结构化记忆功能关闭")
 
     # 生成默认 session_id
     default_id = f"demo-{datetime.now().strftime('%Y%m%d')}"
@@ -655,7 +683,53 @@ def build_memory() -> tuple[ConversationMemory | None, str]:
     else:
         print(f"🆕 新建会话 '{session_id}'")
 
-    return memory, session_id
+    return memory, gatekeeper, session_id
+
+
+# ===================================================================
+# 7b. 工具调用信息提取
+# ===================================================================
+
+def _extract_tool_info_from_messages(messages: list) -> TurnToolInfo | None:
+    """从 agent 返回的消息列表中提取本轮工具调用摘要。
+
+    用于 Gatekeeper.process_turn() 的 tool_info 参数。
+    """
+    if TurnToolInfo is None:
+        return None
+
+    tool_msgs = [m for m in messages if hasattr(m, "type") and m.type == "tool"]
+    ai_with_calls = [m for m in messages if hasattr(m, "tool_calls") and m.tool_calls]
+
+    if not ai_with_calls and not tool_msgs:
+        return TurnToolInfo()  # 无工具调用
+
+    # 收集所有工具调用
+    tool_names: list[str] = []
+    all_args: dict[str, Any] = {}
+    success = True
+    errors: list[str] = []
+    result_parts: list[str] = []
+
+    for ai_msg in ai_with_calls:
+        for tc in ai_msg.tool_calls:
+            tool_names.append(tc.get("name", "unknown"))
+            all_args.update(tc.get("args", {}))
+
+    for tm in tool_msgs:
+        content = str(tm.content) if hasattr(tm, "content") else ""
+        if content.startswith("❌") or "错误" in content or "失败" in content:
+            success = False
+            errors.append(content[:200])
+        result_parts.append(content[:200])
+
+    return TurnToolInfo(
+        tool_name=", ".join(tool_names) if tool_names else "",
+        args=all_args,
+        result_preview=" | ".join(result_parts)[:500],
+        success=success,
+        error_message="; ".join(errors) if errors else None,
+    )
 
 
 # ===================================================================
@@ -667,13 +741,15 @@ def _print_separator(char: str = "─", width: int = 60) -> None:
 
 
 def main() -> None:
-    """交互式 Agent 对话循环，集成 Redis 会话记忆。
+    """交互式 Agent 对话循环，集成 Redis 会话记忆 + Gatekeeper 结构化记忆。
 
     每次对话自动加载历史消息并追加当前输入，agent 可在多轮对话中保持上下文。
+    Gatekeeper 在每轮对话后自动提取结构化记忆条目（需 GATEKEEPER_ENABLED=true）。
 
     特殊命令:
-        /clear   — 清除当前会话记忆
-        /memory  — 查看会话记忆状态
+        /clear   — 清除当前会话记忆（含 Gatekeeper 条目）
+        /memory  — 查看原始消息窗口状态
+        /entries — 查看 Gatekeeper 结构化记忆条目
         /help    — 显示帮助
     """
     _print_separator()
@@ -683,10 +759,13 @@ def main() -> None:
     _print_separator()
 
     agent = build_agent()
-    memory, session_id = build_memory()
+    memory, gatekeeper, session_id = build_memory()
 
     if memory:
-        print("🧠 记忆模式: Redis 会话记忆（多轮上下文保持）")
+        mode_parts = ["Redis 会话记忆（多轮上下文保持）"]
+        if gatekeeper:
+            mode_parts.append("+ Gatekeeper（结构化记忆准入）")
+        print(f"🧠 记忆模式: {' '.join(mode_parts)}")
     else:
         print("🧠 记忆模式: 无记忆（每轮独立）")
     print("输入问题开始对话，/help 查看命令，quit / exit / q 退出")
@@ -711,7 +790,17 @@ def main() -> None:
         if user_input.strip() == "/clear":
             if memory:
                 memory.clear(session_id)
-                print("🧹 会话记忆已清除，开始全新对话。")
+                # Gatekeeper 条目：逐个标记为 expired
+                if gatekeeper:
+                    try:
+                        entries = gatekeeper.list_entries(session_id)
+                        for entry in entries:
+                            gatekeeper.delete_entry(entry.entry_id)
+                        print(f"🧹 会话记忆已清除（含 {len(entries)} 条 Gatekeeper 条目），开始全新对话。")
+                    except Exception:
+                        print("🧹 会话记忆已清除，开始全新对话。")
+                else:
+                    print("🧹 会话记忆已清除，开始全新对话。")
             else:
                 print("⚠️  无记忆模式，无需清除。")
             continue
@@ -739,15 +828,39 @@ def main() -> None:
                 print("⚠️  无记忆模式，无会话状态。")
             continue
 
+        # ---- /entries: 查看 Gatekeeper 条目 ----
+        if user_input.strip() == "/entries":
+            if gatekeeper:
+                entries = gatekeeper.list_entries(session_id)
+                if entries:
+                    print(f"📋 结构化记忆条目 ({len(entries)} 条):")
+                    for i, entry in enumerate(entries, 1):
+                        status_icon = {
+                            "active": "✅", "pending_review": "⏳",
+                            "conflicted": "⚠️", "archived": "📦", "expired": "💤",
+                        }.get(entry.status.value, "❓")
+                        print(f"  {i}. {status_icon} [{entry.entry_type.value}] "
+                              f"{entry.summary or entry.content[:80]} "
+                              f"(conf={entry.confidence:.0%}, v{entry.version})")
+                else:
+                    print(f"📋 会话 '{session_id}' 暂无结构化记忆条目。")
+            elif memory:
+                print("⚠️  Gatekeeper 未启用。设置 GATEKEEPER_ENABLED=true 以启用。")
+            else:
+                print("⚠️  无记忆模式，无结构化条目。")
+            continue
+
         # ---- /help: 显示帮助 ----
         if user_input.strip() == "/help":
             print("可用命令:")
             print("  /clear   — 清除当前会话记忆，开始全新对话")
-            print("  /memory  — 查看会话记忆状态（消息数、轮数、可信度等）")
+            print("  /memory  — 查看原始消息窗口状态（消息数、轮数等）")
+            print("  /entries — 查看 Gatekeeper 结构化记忆条目")
             print("  /help    — 显示此帮助")
             print("  quit / exit / q  — 退出")
             print()
             print("直接输入问题即可开始对话。agent 会记住本轮对话上下文。")
+            print("设置 GATEKEEPER_ENABLED=true 可启用结构化记忆准入过滤。")
             continue
 
         # ---- 正常对话流程 ----
@@ -786,6 +899,20 @@ def main() -> None:
                 final_answer = msg.content
                 break
 
+        # Gatekeeper: 结构化记忆提取（在 final_answer 提取后执行）
+        if gatekeeper and final_answer:
+            try:
+                tool_info = _extract_tool_info_from_messages(all_messages)
+                gatekeeper.process_turn(
+                    session_id=session_id,
+                    turn_index=len(all_messages) // 2,
+                    user_message=user_input,
+                    assistant_message=final_answer,
+                    tool_info=tool_info,
+                )
+            except Exception:
+                logger.warning("⚠️  Gatekeeper 提取失败", exc_info=True)
+
         if final_answer:
             print(f"🤖 Agent: {final_answer}")
         else:
@@ -804,9 +931,19 @@ def main() -> None:
             print(f"\n📊 本轮工具调用: {len(ai_with_tool_calls)} 次 LLM 决策 → {len(tool_msgs)} 次实际执行")
 
         # 显示记忆状态
+        status_parts: list[str] = []
         if memory and memory.session_exists(session_id):
             msg_count = memory.get_message_count(session_id)
-            print(f"🧠 会话记忆: {msg_count} 条消息 | 会话: {session_id}")
+            status_parts.append(f"消息: {msg_count}")
+        if gatekeeper:
+            try:
+                entries = gatekeeper.list_entries(session_id)
+                if entries:
+                    status_parts.append(f"条目: {len(entries)}")
+            except Exception:
+                pass
+        if status_parts:
+            print(f"🧠 会话记忆 | {' | '.join(status_parts)} | 会话: {session_id}")
 
 
 if __name__ == "__main__":

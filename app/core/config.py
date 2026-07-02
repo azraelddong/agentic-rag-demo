@@ -86,6 +86,19 @@ class Settings(BaseSettings):
     )
     redis_session_prefix: str = "mem:session"
 
+    """Gatekeeper / structured memory entry settings"""
+    gatekeeper_enabled: bool = Field(
+        default=False,
+        description="是否启用 Memory Gatekeeper（结构化记忆提取与准入过滤）",
+    )
+    redis_entry_ttl: int = Field(
+        default=2592000,
+        description="TTL in seconds for structured memory entries (default 30 days)",
+        ge=3600,
+        le=86400 * 90,
+    )
+    redis_entry_prefix: str = "mem:entry"
+
     @field_validator("allowed_document_extensions", mode="before")
     @classmethod
     def parse_extensions(cls, value: Any) -> list[str]:

@@ -16,6 +16,8 @@ from app.rag.vector_store import MilvusVectorStore
 from app.agent.agent_service import AgentService
 from app.core.memory.conversation_memory import ConversationMemory
 from app.core.memory.session_store import RedisSessionStore
+from app.core.memory.gatekeeper import MemoryGatekeeper
+from app.core.memory.classifier import MemoryClassifier
 from app.services.chat_service import ChatService
 from app.services.document_service import DocumentService
 
@@ -176,7 +178,36 @@ def get_conversation_memory() -> ConversationMemory:
     return ConversationMemory(store=get_session_store())
 
 
-"""获取AgentService实例，注入共享RAGChain、retry专用依赖和会话记忆。"""
+"""获取 Gatekeeper 专用 RedisSessionStore 单例（独立 key 前缀和 TTL）。"""
+@lru_cache
+def get_entry_store() -> RedisSessionStore:
+    settings = get_settings()
+    return RedisSessionStore(
+        redis_url=settings.redis_url,
+        password=settings.redis_password,
+        default_ttl=settings.redis_entry_ttl,
+        key_prefix=settings.redis_entry_prefix,
+    )
+
+
+"""获取 MemoryGatekeeper 单例（gatekeeper_enabled=False 时返回 None）。"""
+@lru_cache
+def get_memory_gatekeeper() -> MemoryGatekeeper | None:
+    settings = get_settings()
+    if not settings.gatekeeper_enabled:
+        return None
+    # 将 ChatModel.generate 包装为 classifier 需要的 (str) -> str 函数
+    chat_model = get_chat_model()
+    llm_func = lambda prompt: chat_model.generate([
+        {"role": "user", "content": prompt}
+    ])
+    return MemoryGatekeeper(
+        store=get_entry_store(),
+        classifier=MemoryClassifier(llm_func=llm_func),
+    )
+
+
+"""获取AgentService实例，注入共享RAGChain、retry专用依赖、会话记忆和Gatekeeper。"""
 @lru_cache
 def get_agent_service() -> AgentService:
     return AgentService(
@@ -184,4 +215,5 @@ def get_agent_service() -> AgentService:
         retry_retriever=get_hybrid_retriever(),
         retry_query_rewriter=get_agent_retry_query_rewriter(),
         memory=get_conversation_memory(),
+        gatekeeper=get_memory_gatekeeper(),
     )
