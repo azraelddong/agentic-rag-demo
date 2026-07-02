@@ -77,13 +77,36 @@ class AgentService:
         # ── 加载历史 & 注入上下文 ──────────────────────────────
         enriched_question = question
         if session_id and self.memory:
+            memory_entries: list = []
+
+            # 1. 加载结构化长期记忆（Gatekeeper）
+            memory_entries_block = ""
+            if self.gatekeeper:
+                try:
+                    memory_entries = self.gatekeeper.list_entries(session_id)
+                    if memory_entries:
+                        memory_entries_block = self._build_memory_entries_block(memory_entries)
+                except Exception:
+                    logger.warning(
+                        "MEM CTX   session=%s  failed to load structured memories",
+                        session_id,
+                        exc_info=True,
+                    )
+
+            # 2. 加载原始对话历史（ConversationMemory）
             past_messages = self.memory.load_messages(session_id)
+            conversation_block = ""
             if past_messages:
-                ctx_block = self._build_context_block(past_messages)
-                enriched_question = f"{ctx_block}\n\n当前问题: {question}"
+                conversation_block = self._build_context_block(past_messages)
+
+            # 3. 拼接上下文：长期记忆 → 对话历史 → 当前问题
+            if memory_entries_block or conversation_block:
+                parts = [b for b in [memory_entries_block, conversation_block] if b]
+                enriched_question = "\n\n".join(parts) + f"\n\n当前问题: {question}"
                 logger.info(
-                    "MEM CTX   session=%s  injected %d past messages as context",
+                    "MEM CTX   session=%s  injected %d structured memories + %d past messages",
                     session_id,
+                    len(memory_entries),
                     len(past_messages),
                 )
 
@@ -154,6 +177,38 @@ class AgentService:
             role = "用户" if _msg_type(msg) == "human" else "助手"
             content = _get_msg_content(msg)
             lines.append(f"{role}: {content}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_memory_entries_block(entries: list) -> str:
+        """将 Gatekeeper 结构化记忆条目格式化为上下文文本块。
+
+        按类型分组展示，只注入 active 状态的条目，帮助 Agent 理解用户
+        长期偏好、工作习惯、有效经验等，实现跨会话的记忆复用。
+
+        Args:
+            entries: Gatekeeper.list_entries() 返回的 MemoryEntry 列表。
+
+        Returns:
+            格式化的记忆上下文文本块，无条目时返回空字符串。
+        """
+        if not entries:
+            return ""
+
+        # 类型中文标签
+        type_labels: dict[str, str] = {
+            "preference": "用户偏好",
+            "work_habit": "工作习惯",
+            "business_config": "业务配置",
+            "experience": "有效经验",
+            "correction": "历史纠正",
+            "fix_strategy": "修复策略",
+        }
+
+        lines = ["以下是已记录的长期用户偏好与记忆，请结合这些信息回答问题：", ""]
+        for entry in entries:
+            label = type_labels.get(entry.entry_type.value, entry.entry_type.value)
+            lines.append(f"- [{label}] {entry.summary or entry.content[:100]}")
         return "\n".join(lines)
 
     @staticmethod

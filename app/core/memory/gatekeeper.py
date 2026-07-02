@@ -25,7 +25,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from app.core.memory.classifier import MemoryClassifier
 from app.core.memory.entry_models import (
@@ -49,18 +49,35 @@ _SENSITIVE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("身份证号", re.compile(r"\d{17}[\dXx]")),
     ("手机号", re.compile(r"1[3-9]\d{9}")),
     ("JWT Token", re.compile(r"eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+")),
-    ("密码赋值", re.compile(r"(?:password|passwd|pwd|token)\s*[=:]\s*\S+", re.IGNORECASE)),
+    ("密码赋值", re.compile(r"(?:password|passwd|pwd|secret|token)\s*[=:]\s*\S+", re.IGNORECASE)),
     ("邮箱", re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")),
+    ("信用卡号", re.compile(r"\b(?:\d[ -]*?){13,19}\b")),
+    ("银行卡号", re.compile(r"\b\d{16,19}\b")),
+    ("IP地址", re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")),
+    ("私钥头", re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----")),
+    ("AWS Key", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("GitHub Token", re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}")),
+    ("通用 Secret", re.compile(r"(?:secret|token|key|password|passwd)\s*[:=]\s*[\"']?[A-Za-z0-9_\-\.]{8,}[\"']?", re.IGNORECASE)),
 ]
 
 # 纯命令前缀
 _COMMAND_PREFIXES = ("/clear", "/memory", "/help", "/stats")
 
 # 一次性临时查询关键词（仅含这些词且无后续约束 → 拦截）
-_TEMP_QUERY_MARKERS = ("今天", "现在", "当前时间", "几点了", "几号")
+_TEMP_QUERY_MARKERS = (
+    "今天", "现在", "当前时间", "几点了", "几号", "星期几",
+    "天气", "温度", "下雨", "雾霾", "台风",
+    "today", "now", "current time", "what time", "what day",
+    "weather", "temperature", "forecast",
+    "热搜", "新闻", "最新", "实时", "刚刚",
+    "trending", "news", "latest", "breaking",
+)
 
 # 极短消息无信息量阈值
 _MIN_MEANINGFUL_LENGTH = 5
+
+# 最低置信度阈值：低于此值的 LLM 候选直接丢弃
+MIN_CONFIDENCE_THRESHOLD = 0.4
 
 
 def _contains_sensitive_info(text: str) -> tuple[bool, str]:
@@ -87,7 +104,15 @@ def _is_trivial(text: str) -> bool:
     if len(stripped) < _MIN_MEANINGFUL_LENGTH:
         return True
     # 纯招呼词
-    greeting_only = {"hi", "hello", "你好", "嗨", "在吗", "好", "嗯", "哦", "谢谢", "thanks", "ok"}
+    greeting_only = {
+        "hi", "hello", "hey", "yo", "你好", "您好", "嗨", "在吗", "在不在",
+        "好", "嗯", "哦", "行", "OK", "ok", "okay", "fine",
+        "谢谢", "thanks", "thank you", "thx", "多谢", "感谢",
+        "早", "早上好", "晚安", "再见", "bye", "goodbye", "拜拜",
+        "收到", "明白了", "了解", "got it", "understood",
+        "没事", "算了", "不用了", "never mind", "nvm",
+        "哈哈", "呵呵", "lol", "lmao", "😂", "👍",
+    }
     if stripped.lower() in greeting_only:
         return True
     return False
@@ -108,6 +133,56 @@ def _is_likely_temporary(user_msg: str, assistant_msg: str) -> bool:
     return has_temp_marker and not has_long_term
 
 
+def filter_single_message(text: str) -> tuple[bool, str]:
+    """对单条消息做安全检查，供 ConversationMemory 存取时调用。
+
+    与 rule_based_filter 不同，此函数仅检查单条消息自身的问题
+    （纯命令、无意义内容），不做跨消息的联合判断。
+
+    注意：敏感信息（PII/密钥等）不会导致消息被丢弃，而是由存储层
+    在保存时通过 ``should_encrypt_message()`` 检测并加密处理。
+
+    Args:
+        text: 单条消息的文本内容。
+
+    Returns:
+        (should_skip, reason):
+        - should_skip=True → 该消息不应被存储/加载
+        - reason 说明拦截原因
+    """
+    if not text or not text.strip():
+        return True, "空消息"
+
+    # 1. 纯命令
+    if _is_command(text):
+        return True, "纯命令输入"
+
+    # 2. 极短无信息量消息
+    if _is_trivial(text):
+        return True, "极短无信息量消息"
+
+    return False, ""
+
+
+def should_encrypt_message(text: str) -> bool:
+    """判断消息是否包含敏感信息，需要在保存前加密。
+
+    供 ConversationMemory 和 MemoryGatekeeper 在持久化前调用。
+    与 filter_single_message 不同：敏感信息不会导致消息被丢弃，
+    而是触发加密处理后再保存。
+
+    Args:
+        text: 单条消息的文本内容。
+
+    Returns:
+        True 表示消息包含疑似敏感信息（PII/密钥等），需要加密保存。
+    """
+    if not text or not text.strip():
+        return False
+    has_sensitive, _ = _contains_sensitive_info(text)
+    return has_sensitive
+
+
 def rule_based_filter(
     user_message: str,
     assistant_message: str,
@@ -123,23 +198,12 @@ def rule_based_filter(
         - should_skip=True → 跳过后续 LLM 分类，不存储
         - reason 说明拦截原因
     """
-    # 1. 纯命令
-    if _is_command(user_message):
-        return True, "纯命令输入 (/clear, /help 等)"
+    # 1. 单条消息安全检查（复用 filter_single_message 覆盖: 命令/空/招呼，不含敏感信息）
+    should_skip, reason = filter_single_message(user_message)
+    if should_skip:
+        return True, reason
 
-    # 2. 敏感信息
-    has_sensitive, label = _contains_sensitive_info(user_message)
-    if has_sensitive:
-        return True, f"包含敏感信息: {label}"
-    has_sensitive, label = _contains_sensitive_info(assistant_message)
-    if has_sensitive:
-        return True, f"助手回复中含敏感信息: {label}"
-
-    # 3. 极短无信息量消息
-    if _is_trivial(user_message):
-        return True, "极短无信息量消息（<5 字或纯招呼）"
-
-    # 4. 一次性临时查询（无长期标记）
+    # 2. 一次性临时查询（无长期标记）—— 需联合判断 user + assistant
     if _is_likely_temporary(user_message, assistant_message):
         return True, "一次性临时查询（天气/时间等，无长期价值）"
 
@@ -293,15 +357,24 @@ class MemoryGatekeeper:
         self,
         store: RedisSessionStore,
         classifier: MemoryClassifier | None = None,
+        *,
+        encrypt_func: Callable[[str], str] | None = None,
+        decrypt_func: Callable[[str], str] | None = None,
     ) -> None:
         """初始化 Gatekeeper。
 
         Args:
             store: Redis 存储实例（应使用 key_prefix="mem:entry"）。
             classifier: LLM 分类器。为 None 时跳过 Phase 2，仅做规则过滤。
+            encrypt_func: 可选，敏感内容加密函数。
+               签名为 ``(text: str) -> str``。
+            decrypt_func: 可选，敏感内容解密函数。
+               签名为 ``(text: str) -> str``，自动识别并解密，非密文透传。
         """
         self.store = store
         self.classifier = classifier
+        self._encrypt_func = encrypt_func
+        self._decrypt_func = decrypt_func
 
     # ==================================================================
     # Public API — 主入口
@@ -350,6 +423,16 @@ class MemoryGatekeeper:
 
         for candidate in candidates:
             if candidate.should_discard:
+                continue
+
+            # 低置信度过滤：confidence < 阈值的候选直接丢弃
+            if candidate.confidence < MIN_CONFIDENCE_THRESHOLD:
+                logger.debug(
+                    "GATEKEEPER  low-confidence discard  type=%s  confidence=%.2f  summary=%s",
+                    candidate.entry_type,
+                    candidate.confidence,
+                    candidate.summary[:80],
+                )
                 continue
 
             # 3a. 冲突检测
@@ -433,12 +516,23 @@ class MemoryGatekeeper:
         return True
 
     def get_entry(self, entry_id: str) -> MemoryEntry | None:
-        """读取单条记忆条目。"""
+        """读取单条记忆条目（自动解密已加密的 content/summary 字段）。"""
         raw = self.store.get(entry_id, self._SUB_DATA)
         if not raw:
             return None
         try:
-            return MemoryEntry(**json.loads(raw))
+            data = json.loads(raw)
+
+            # ── 解密敏感字段 ──────────────────────────────────
+            if self._decrypt_func is not None:
+                content = data.get("content", "")
+                if isinstance(content, str):
+                    data["content"] = self._decrypt_func(content)
+                summary = data.get("summary", "")
+                if isinstance(summary, str):
+                    data["summary"] = self._decrypt_func(summary)
+
+            return MemoryEntry(**data)
         except Exception as exc:
             logger.warning("GATEKEEPER  get_entry deserialize failed  %s: %s", entry_id, exc)
             return None
@@ -576,12 +670,20 @@ class MemoryGatekeeper:
     def _persist_entry(self, entry: MemoryEntry, session_id: str) -> None:
         """将 MemoryEntry 写入 Redis 并更新所有索引。
 
-        执行三步：
-        1. 写 data key
-        2. 更新 session index
-        3. 更新 global type index
-        4. 如果冲突，更新 conflict index
+        执行四步：
+        1. 加密敏感字段（如果配置了加密函数）
+        2. 写 data key
+        3. 更新 session index
+        4. 更新 global type index
+        5. 如果冲突，更新 conflict index
         """
+        # ── 敏感内容加密 ───────────────────────────────────────
+        if self._encrypt_func is not None:
+            if should_encrypt_message(entry.content):
+                entry.content = self._encrypt_func(entry.content)
+            if entry.summary and should_encrypt_message(entry.summary):
+                entry.summary = self._encrypt_func(entry.summary)
+
         # 1. Data
         self.store.set(entry.entry_id, self._SUB_DATA, entry.model_dump_json(ensure_ascii=False))
 

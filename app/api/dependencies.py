@@ -16,8 +16,9 @@ from app.rag.vector_store import MilvusVectorStore
 from app.agent.agent_service import AgentService
 from app.core.memory.conversation_memory import ConversationMemory
 from app.core.memory.session_store import RedisSessionStore
-from app.core.memory.gatekeeper import MemoryGatekeeper
+from app.core.memory.gatekeeper import MemoryGatekeeper, filter_single_message
 from app.core.memory.classifier import MemoryClassifier
+from app.core.memory.crypto import decrypt_content, encrypt_content, get_fernet
 from app.services.chat_service import ChatService
 from app.services.document_service import DocumentService
 
@@ -172,10 +173,22 @@ def get_session_store() -> RedisSessionStore:
     )
 
 
-"""获取ConversationMemory单例，注入RedisSessionStore。"""
+"""获取 Fernet 加密实例（进程级缓存，未配置密钥时自动生成）。"""
+@lru_cache
+def _get_fernet():
+    return get_fernet(get_settings())
+
+
+"""获取ConversationMemory单例，注入RedisSessionStore、内容安全过滤器和加密函数。"""
 @lru_cache
 def get_conversation_memory() -> ConversationMemory:
-    return ConversationMemory(store=get_session_store())
+    fernet = _get_fernet()
+    return ConversationMemory(
+        store=get_session_store(),
+        content_filter=filter_single_message,
+        encrypt_func=(lambda text: encrypt_content(text, fernet)) if fernet else None,
+        decrypt_func=(lambda text: decrypt_content(text, fernet)) if fernet else None,
+    )
 
 
 """获取 Gatekeeper 专用 RedisSessionStore 单例（独立 key 前缀和 TTL）。"""
@@ -201,9 +214,12 @@ def get_memory_gatekeeper() -> MemoryGatekeeper | None:
     llm_func = lambda prompt: chat_model.generate([
         {"role": "user", "content": prompt}
     ])
+    fernet = _get_fernet()
     return MemoryGatekeeper(
         store=get_entry_store(),
         classifier=MemoryClassifier(llm_func=llm_func),
+        encrypt_func=(lambda text: encrypt_content(text, fernet)) if fernet else None,
+        decrypt_func=(lambda text: decrypt_content(text, fernet)) if fernet else None,
     )
 
 

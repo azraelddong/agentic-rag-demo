@@ -37,7 +37,7 @@ from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
 from langchain.tools import tool
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from pydantic import Field
 
@@ -55,12 +55,19 @@ try:
         ConversationMemory, RedisSessionStore,
         MemoryGatekeeper, MemoryClassifier, TurnToolInfo,
     )
+    from app.core.memory.gatekeeper import filter_single_message, should_encrypt_message
+    from app.core.memory.crypto import encrypt_content, decrypt_content, get_fernet
     _MEMORY_AVAILABLE = True
 except ImportError:
     _MEMORY_AVAILABLE = False
     MemoryGatekeeper = None  # type: ignore[assignment,misc]
     MemoryClassifier = None  # type: ignore[assignment,misc]
     TurnToolInfo = None       # type: ignore[assignment,misc]
+    filter_single_message = None  # type: ignore[assignment,misc]
+    should_encrypt_message = None  # type: ignore[assignment,misc]
+    encrypt_content = None  # type: ignore[assignment,misc]
+    decrypt_content = None  # type: ignore[assignment,misc]
+    get_fernet = None  # type: ignore[assignment,misc]
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -87,6 +94,7 @@ def _build_llm() -> ChatOpenAI:
         model=os.getenv("LLM_MODEL_NAME", "gpt-4o-mini"),
         temperature=0.0,         # ★ 防错关键：temperature=0 减少随机性
         max_tokens=1024,
+        streaming=True,          # 打字机输出：启用 token 级流式生成
     )
 
 
@@ -648,7 +656,27 @@ def build_memory() -> tuple[ConversationMemory | None, object | None, str]:
         print(f"   启动 Redis: docker compose up -d redis")
         return None, None, ""
 
-    memory = ConversationMemory(store=store)
+    # ── 初始化加密 ──────────────────────────────────────────────
+    fernet = None
+    enc_func = None
+    dec_func = None
+    if get_fernet is not None:
+        try:
+            from app.core.config import get_settings
+            fernet = get_fernet(get_settings())
+        except Exception:
+            # 直接使用环境变量
+            fernet = get_fernet(None)
+        if fernet:
+            enc_func = lambda text: encrypt_content(text, fernet)
+            dec_func = lambda text: decrypt_content(text, fernet)
+
+    memory = ConversationMemory(
+        store=store,
+        content_filter=filter_single_message if filter_single_message else None,
+        encrypt_func=enc_func,
+        decrypt_func=dec_func,
+    )
 
     # ── 可选: 构建 Gatekeeper ──────────────────────────────────────
     gatekeeper = None
@@ -666,7 +694,12 @@ def build_memory() -> tuple[ConversationMemory | None, object | None, str]:
             classifier = MemoryClassifier(
                 llm_func=lambda prompt: llm.invoke(prompt).content,
             )
-            gatekeeper = MemoryGatekeeper(store=entry_store, classifier=classifier)
+            gatekeeper = MemoryGatekeeper(
+                store=entry_store,
+                classifier=classifier,
+                encrypt_func=enc_func,
+                decrypt_func=dec_func,
+            )
             print("🛡️  Gatekeeper 已启用（结构化记忆准入过滤）")
         else:
             print("⚠️  Gatekeeper 模块不可用，结构化记忆功能关闭")
@@ -863,8 +896,7 @@ def main() -> None:
             print("设置 GATEKEEPER_ENABLED=true 可启用结构化记忆准入过滤。")
             continue
 
-        # ---- 正常对话流程 ----
-        print("🤖 Agent 思考中...")
+        # ---- 正常对话流程（打字机流式输出） ----
         _print_separator()
 
         try:
@@ -877,11 +909,81 @@ def main() -> None:
             # 追加当前用户消息
             messages = history + [HumanMessage(content=user_input)]
 
-            # 调用 agent
-            result = agent.invoke({"messages": messages})
+            # ── 流式调用 agent ─────────────────────────────────────
+            config = {"configurable": {"thread_id": session_id}}
+            all_messages: list = list(history) + [HumanMessage(content=user_input)]
+            final_answer_parts: list[str] = []
+            tool_call_count = 0
+            tool_result_count = 0
+            _current_tool_names: list[str] = []
 
-            # 提取本次对话产生的完整消息列表并持久化
-            all_messages = result.get("messages", [])
+            print("🤖 Agent: ", end="", flush=True)
+
+            for msg, _meta in agent.stream(
+                {"messages": messages},
+                config=config,
+                stream_mode="messages",
+            ):
+                all_messages.append(msg)
+
+                # ── AI 流式 token → 打字机输出 ──────────────────
+                if isinstance(msg, AIMessageChunk):
+                    content = msg.content
+                    if isinstance(content, str) and content:
+                        print(content, end="", flush=True)
+                        final_answer_parts.append(content)
+
+                    # 流式 chunk 也可能携带 tool_call 信息
+                    if hasattr(msg, "tool_calls") and msg.tool_calls:
+                        # 有实质 tool_call name 时才计数（过滤掉流式构造中的空壳）
+                        real_calls = [
+                            tc for tc in msg.tool_calls
+                            if tc.get("name")
+                        ]
+                        if real_calls and _current_tool_names:
+                            # 去重：与上一轮已打印的工具名比对
+                            new_calls = [
+                                tc for tc in real_calls
+                                if tc["name"] not in _current_tool_names
+                            ]
+                            if new_calls:
+                                print()  # 换行，中断打字机输出
+                                for tc in new_calls:
+                                    print(f"  🔧 调用工具: {tc['name']} ...")
+                                    tool_call_count += 1
+                                print("🤖 Agent: ", end="", flush=True)
+                            _current_tool_names = [tc["name"] for tc in real_calls]
+
+                # ── 非流式 AI 消息（含 tool_calls 决策） ─────────
+                elif hasattr(msg, "tool_calls") and msg.tool_calls:
+                    real_calls = [
+                        tc for tc in msg.tool_calls
+                        if tc.get("name")
+                    ]
+                    if real_calls:
+                        # 结束当前打字机行
+                        if final_answer_parts:
+                            print()
+                        for tc in real_calls:
+                            if tc.get("name") not in _current_tool_names:
+                                print(f"  🔧 调用工具: {tc['name']} ...")
+                                tool_call_count += 1
+                        _current_tool_names = [tc["name"] for tc in real_calls]
+
+                # ── 工具执行结果 ───────────────────────────────
+                elif hasattr(msg, "type") and msg.type == "tool":
+                    tool_result_count += 1
+                    content_preview = (
+                        str(msg.content)[:80].replace("\n", " ")
+                        if hasattr(msg, "content") else ""
+                    )
+                    if str(msg.content).startswith("❌"):
+                        logger.warning("⚠️  工具返回错误: %s", content_preview)
+
+            print()  # 流式结束，换行
+            final_answer = "".join(final_answer_parts).strip()
+
+            # ── 持久化消息 ─────────────────────────────────────
             if memory:
                 try:
                     memory.save_messages(session_id, all_messages)
@@ -889,17 +991,11 @@ def main() -> None:
                     logger.warning("⚠️  保存会话记忆失败: %s", exc)
 
         except Exception as exc:
+            print()
             print(f"❌ Agent 调用失败: {exc}")
             continue
 
-        # 提取最终回答
-        final_answer = None
-        for msg in reversed(all_messages):
-            if hasattr(msg, "content") and msg.type == "ai" and msg.content:
-                final_answer = msg.content
-                break
-
-        # Gatekeeper: 结构化记忆提取（在 final_answer 提取后执行）
+        # Gatekeeper: 结构化记忆提取
         if gatekeeper and final_answer:
             try:
                 tool_info = _extract_tool_info_from_messages(all_messages)
@@ -913,22 +1009,12 @@ def main() -> None:
             except Exception:
                 logger.warning("⚠️  Gatekeeper 提取失败", exc_info=True)
 
-        if final_answer:
-            print(f"🤖 Agent: {final_answer}")
-        else:
+        if not final_answer:
             print("🤖 Agent: (无输出)")
 
         # 汇总工具调用
-        tool_msgs = [
-            msg for msg in all_messages
-            if hasattr(msg, "type") and msg.type == "tool"
-        ]
-        ai_with_tool_calls = [
-            msg for msg in all_messages
-            if hasattr(msg, "tool_calls") and msg.tool_calls
-        ]
-        if ai_with_tool_calls:
-            print(f"\n📊 本轮工具调用: {len(ai_with_tool_calls)} 次 LLM 决策 → {len(tool_msgs)} 次实际执行")
+        if tool_call_count > 0:
+            print(f"\n📊 本轮工具调用: {tool_call_count} 次 LLM 决策 → {tool_result_count} 次实际执行")
 
         # 显示记忆状态
         status_parts: list[str] = []

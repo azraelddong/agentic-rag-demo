@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     )
     redis_session_prefix: str = "mem:session"
 
+    """Memory encryption settings"""
+    memory_encryption_key: str = Field(
+        default="",
+        description="Fernet 对称加密密钥，用于加密 Redis 中的敏感记忆内容。留空则自动生成（进程内有效）。",
+    )
+
     """Gatekeeper / structured memory entry settings"""
     gatekeeper_enabled: bool = Field(
         default=False,
